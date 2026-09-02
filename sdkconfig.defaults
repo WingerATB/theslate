@@ -1,0 +1,58 @@
+# The target, so that a clean checkout can just "idf.py build".
+#
+# Without it CMake defaults to esp32 and fails looking for an xtensa compiler,
+# which reads like a broken repository rather than a missing step. The README
+# still says to run "idf.py set-target esp32c3"; this makes forgetting harmless.
+CONFIG_IDF_TARGET="esp32c3"
+
+# Bluetooth: BLE 4.2 only, matching the upstream DJI demo. The camera does not
+# need the 5.0 feature set and disabling it saves flash and RAM.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+
+# The Supermini exposes the C3's native USB Serial/JTAG, so the console must go
+# there rather than to UART0. UART1 (GPIO4/5) is left free for the FC link.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# A stalled BLE stack must never take the module down in a way that leaves a
+# clip running; let the watchdog reset us instead.
+CONFIG_ESP_TASK_WDT_INIT=y
+
+# 4 MB flash with two OTA slots. The stock single-app table gives a 1 MB app
+# slot, and the app was already at 81% of that before Wi-Fi was linked in.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+
+# SoftAP only: no station mode, no scan, no roaming. Trims the Wi-Fi library.
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+
+# The settings page is a single embedded file served from RAM; the defaults
+# are sized for multi-connection file servers we do not have.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=256
+
+# --- Config mode runs BLE and Wi-Fi at once -------------------------------
+# The camera picker scans while the settings page is being served, so the two
+# radios really do share the antenna and the coexistence arbiter is required.
+# Normal boots never start Wi-Fi, so in flight it has nothing to arbitrate.
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# The access point serves one phone and a 4 KB page. The stock buffer counts
+# are sized for a file server and cost tens of KB of heap that has to be shared
+# with the BLE stack. Trimming them is what makes both fit.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+
+# --- Firmware updates over the settings page ------------------------------
+# A freshly installed image boots as PENDING_VERIFY and must declare itself
+# healthy. If it crashes or hangs before doing so, the bootloader reverts to the
+# slot that worked -- without a cable, which is the whole point for a user who
+# has no toolchain.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

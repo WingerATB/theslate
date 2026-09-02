@@ -1,0 +1,53 @@
+SlateFPV
+Copyright (c) 2026 Arany-Tóth Bence
+
+This product includes software developed by SZ DJI Technology Co., Ltd.
+
+--------------------------------------------------------------------------------
+components/dji_link/
+--------------------------------------------------------------------------------
+
+Derived from dji-sdk/Osmo-GPS-Controller-Demo at commit 92fe23e:
+
+    https://github.com/dji-sdk/Osmo-GPS-Controller-Demo
+
+    Copyright (c) 2025 SZ DJI Technology Co., Ltd.
+
+Upstream offers that demo, and the DJI R SDK Protocol documentation it is built
+on, under BOTH the MIT License and DJI's End User License Agreement. The full
+text as published upstream is kept verbatim at:
+
+    components/dji_link/LICENSE-DJI
+    http://developer.dji.com/policies/eula/
+
+Every modification made here is tagged in-line with "SLATE PATCH" or "SLATE
+ADDITION", so the derived work can be separated from the original by reading the
+source.
+
+This component remains under the MIT License it arrived with. Relicensing DJI's
+work would not be ours to do, and would gain nothing in any case: the same code
+is published under MIT at the repository above.
+
+A note on what you will read in those files: the vendored sources carry an
+SPDX-License-Identifier of MIT, and also a proprietary boilerplate header
+asserting that dissemination is prohibited without DJI's written consent. Those
+two statements do not agree with each other. They are reproduced exactly as
+upstream published them, unedited, and no claim is made here about which
+governs. Anyone redistributing this project, or building a product on it, should
+read components/dji_link/LICENSE-DJI and the EULA and reach their own view.
+
+--------------------------------------------------------------------------------
+Everything else
+--------------------------------------------------------------------------------
+
+All other code in this repository -- the firmware, the host tests and the
+tooling -- is original work under the PolyForm Noncommercial License 1.0.0 in
+LICENSE, and the source files carry an SPDX-License-Identifier header saying so.
+
+That is a source-available licence, not an open-source one: noncommercial use,
+modification and sharing are all permitted, and commercial use is not. The two
+identifiers therefore both appear in this tree, and which applies to a file is
+answered by the header at the top of it:
+
+    SPDX-License-Identifier: MIT                            components/dji_link/
+    SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0   everything else

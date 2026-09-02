@@ -1,0 +1,127 @@
+menu "SlateFPV configuration"
+
+config CAMLINK_BENCH
+    bool "Bench console (development only)"
+    default n
+    help
+      DEVELOPMENT ONLY -- leave this off for anything that flies.
+
+      Adds a line protocol on the USB serial port, driven by
+      tools/slate-cli.py. Alongside read-only status it accepts commands
+      that rebind the module to an arbitrary MAC, drop the camera link,
+      clear BLE bonds and change record settings, none of which belong on
+      a shipped unit.
+
+        out:  #ST <link> <valid> <rec> <clip_s> <free_mb> <left_s> <batt>
+              #FC <link> <armed> <boxarm_known> <bit> <nch> ch0..ch7 <rx> <crc>
+        in:   'r' toggle record, '1' start, '0' stop
+
+      Both halves run, so the flight controller can be brought up on its own
+      with the camera switched off, and vice versa. Recording only ever changes
+      on an explicit keypress.
+
+choice CAMLINK_BLE_TX_POWER
+    prompt "BLE transmit power"
+    default CAMLINK_TX_N24
+    help
+      -24 dBm is correct in flight: the camera sits ~20 cm away, leaving about
+      45 dB of margin, and staying quiet matters next to the ELRS receiver.
+
+      It is a poor bench setting. Connection establishment needs the camera to
+      hear us, and across a desk -24 dBm is marginal -- the symptom is a camera
+      that is discovered reliably but whose connections time out.
+
+    config CAMLINK_TX_N24
+        bool "-24 dBm (flight default, camera ~20 cm)"
+    config CAMLINK_TX_N12
+        bool "-12 dBm (bench, camera on the same desk)"
+    config CAMLINK_TX_N0
+        bool "0 dBm (bench, camera across the room)"
+    config CAMLINK_TX_P3
+        bool "+3 dBm (maximum reach, not for flight)"
+endchoice
+
+config CAMLINK_BLE_BONDING
+    bool "Bond / encrypt the BLE link to the camera"
+    default y
+    help
+      Just Works bonding plus link encryption before speaking DUML.
+
+      Required, not optional: unencrypted, the camera accepts the connection
+      and then terminates it itself with reason 0x13 after about 16 s. Turn off
+      only to reproduce the upstream DJI demo's behaviour.
+
+config CAMLINK_BLE_CLEAR_BONDS
+    bool "Clear stored BLE bonds at every boot"
+    default n
+    help
+      Bring-up aid. A bond held on one side but forgotten by the other makes
+      the next connection fail at link level with reason 0x3e.
+
+      Leave OFF in normal use: once a camera is paired, deleting our half means
+      the camera still expects an encrypted link we can no longer establish and
+      every reconnect times out. Use the button's long-press re-bind instead,
+      which clears both sides together.
+
+config CAMLINK_BLE_SCAN_DEBUG
+    bool "Log every BLE advertisement, GATT service and characteristic"
+    default n
+    help
+      Dumps name, RSSI, manufacturer data and the DJI-filter verdict for every
+      advertisement, plus the full GATT database and a one-shot read of every
+      readable characteristic on connect.
+
+      Diagnostic only -- it adds around a second to every connection. Use it
+      when a camera is powered on but never connects: it distinguishes "not
+      advertising" from "advertising something we reject", which otherwise look
+      identical on the console.
+
+choice CAMLINK_RECORD_MODE
+    prompt "Record trigger mode"
+    default CAMLINK_MODE_CUT
+    config CAMLINK_MODE_ARM
+        bool "ARM - arm starts recording, disarm stops"
+    config CAMLINK_MODE_SWITCH
+        bool "SWITCH - an RC channel controls recording"
+    config CAMLINK_MODE_CUT
+        bool "CUT - arm records; a press cuts and restarts the clip"
+
+    config CAMLINK_MODE_BOTH
+        bool "BOTH - arm records; a press toggles recording independently"
+endchoice
+
+config CAMLINK_SWITCH_CHANNEL
+    int "RC switch channel (0-based; 6 = AUX3)"
+    range 0 17
+    default 6
+    help
+      First-boot default only -- the settings page writes the real value to
+      NVS. MSP_RC returns rcData[] with the four sticks first, so AUX n is
+      index n+3.
+
+config CAMLINK_SWITCH_THRESHOLD
+    int "RC switch window, lower edge (us)"
+    range 900 2100
+    default 1750
+    help
+      First-boot default only. The range is 900-2100 because that is what a
+      receiver actually produces: CRSF and SBUS both put a switch at +100% on
+      about 2012 us, so a limit of 2000 could not contain the very position the
+      user was pointing at. See the scale note in camlink_cfg.h.
+
+config CAMLINK_MSP_TX_GPIO
+    int "UART1 TX GPIO (to FC RX)"
+    default 4
+    help
+      Avoid GPIO2 and GPIO3. GPIO8 and GPIO9 carry the onboard LED and button
+      and must stay free. Leave GPIO20/21 for the console.
+
+config CAMLINK_MSP_RX_GPIO
+    int "UART1 RX GPIO (from FC TX)"
+    default 5
+
+config CAMLINK_MSP_BAUD
+    int "MSP baud rate"
+    default 115200
+
+endmenu
