@@ -1,0 +1,17 @@
+# CAMLINK partition table -- 4 MB flash.
+#
+# Chosen once, deliberately, because changing it later is the one edit that
+# costs shipped users their settings: a different layout means a full erase and
+# reflash, not an update. So the OTA slots are reserved NOW, even though the
+# web updater is not written yet. Reserving space that goes unused is free;
+# needing it later after boards have shipped is not.
+#
+# nvs stays at its stock 0x9000/0x6000 so a module flashed with the old
+# single-app table keeps its bound camera and settings across this change.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x1E0000,
+ota_1,      app,  ota_1,   0x200000, 0x1E0000,

@@ -1,0 +1,44 @@
+build/
+build-release/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+*.o
+
+# Host test binaries. run_tests.sh compiles them in place next to their sources
+# and does not clean up, so they have to be ignored by pattern: naming them one
+# at a time meant every suite added after the rule was written silently
+# committed its executable. Eight of them were tracked -- macOS arm64, rebuilt
+# by the script in a second, and useless on anyone else's machine.
+test/host/test_*
+!test/host/test_*.c
+
+# Deliberately broken firmware for the rollback test -- never beside real releases.
+*BROKEN*
+testimages/
+preview.html
+
+# Development tree: the bench console, the desk tooling, serial captures and
+# deliberately-broken test images. Not part of what ships, and not something a
+# published repository should carry -- the console alone can rebind the module
+# to any MAC, drop its camera link and clear its BLE bonds.
+#
+# It sits inside this directory rather than beside it so the build finds it at
+# the same path either way: CMakeLists.txt adds it only if it is here, so a
+# checkout without it builds a release image with no reference to it at all.
+/dev/
+
+# Built firmware. 56 MB of it accumulated across sixteen versions, which is
+# almost the entire repository by size, and git keeps every byte of it for ever.
+# Binaries belong on GitHub Releases, attached to the tag they were built from:
+# one download for the person who wants one, none for the person who wants the
+# source. tools/release.sh still writes them here; they are just not committed.
+#
+# The current release's sdkconfig snapshot IS kept: it is what makes a build
+# reproducible, since sdkconfig.defaults alone does not carry the local options.
+# At 74 KB a version it is not free either, so older ones are attached to their
+# own tags rather than kept here for ever.
+releases/*.bin
+
+.DS_Store

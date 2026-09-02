@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"
+     width="100" height="100" role="img" aria-label="SlateFPV">
+  <title>SlateFPV</title>
+  <!--
+    The mark with an explicit fill, for a light ground (GitHub's light theme, docs, the bench).
+
+    mark.svg uses fill="currentColor" and is the one to use wherever the mark
+    inherits a colour. This variant exists because an <img> has no inherited
+    colour: currentColor resolves to black there, which disappears on a dark
+    ground. GitHub READMEs load SVGs through <img>, so they need this pair
+    behind a <picture> with prefers-color-scheme.
+
+    Geometry is identical to mark.svg. Change one, change all three.
+  -->
+  <g fill="#14171C">
+    <polygon points="13.85,86 26.85,86 46.15,14 33.15,14"/>
+    <polygon points="33.85,86 46.85,86 66.15,14 53.15,14"/>
+    <polygon points="53.85,86 66.85,86 86.15,14 73.15,14"/>
+  </g>
+</svg>
