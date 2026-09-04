@@ -42,3 +42,10 @@ preview.html
 releases/*.bin
 
 .DS_Store
+
+# Bundled firmware for the browser flasher: a build artifact, not source, kept
+# out of git like the release binaries. Regenerate with:
+#   idf.py build && (cd build && esptool.py --chip esp32c3 merge_bin \
+#       -o ../webtool/firmware/slate-full.bin @flash_args)
+# or drop a release -full.bin there. The tool's "choose a .bin" works without it.
+webtool/firmware/*.bin
