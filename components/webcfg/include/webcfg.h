@@ -24,11 +24,41 @@
 #define CAMLINK_WEBCFG_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /* Read and clear the one-shot boot flag. Call once, early in app_main().
  * Clearing on read is what makes config mode self-limiting: even a crash loop
  * inside the web server comes back as a normal boot. */
 bool webcfg_boot_flag_take(void);
+
+/* Same mechanism for bind mode: one boot that scans for the nearest camera,
+ * binds it, and reboots. Consumed on read, so it can never stick. */
+/* Shared config cores, so the serial API and the Wi-Fi server produce and
+ * accept exactly the same thing. The *_json builders write compact JSON into
+ * the caller's buffer and return its length. The apply_* functions take a
+ * form-urlencoded string (key=value&...) and return NULL on success or a short
+ * error string. */
+int  webcfg_state_json(char *buf, size_t cap);
+int  webcfg_scan_json(char *buf, size_t cap);
+const char *webcfg_apply_config(const char *form);
+const char *webcfg_apply_osd(const char *form);
+const char *webcfg_apply_bind(const char *form);
+
+bool webcfg_bind_flag_take(void);
+
+/* USB-config mode: BLE scanner live for a real-time camera list, settings and
+ * picker driven over the USB serial API (see usbcli), no Wi-Fi at all -- so
+ * Bluetooth and the link to the host never fight over the one radio. Consumed
+ * on read like the others. */
+bool webcfg_usbcfg_flag_take(void);
+
+/* One-shot override: boot into normal flight operation for a single boot even
+ * though a computer is on USB, so the camera link and the OSD run while a bench
+ * cable is attached. Consumed on read; the next boot auto-detects again. */
+bool webcfg_bootnormal_flag_take(void);
+void webcfg_reboot_into_normal(void) __attribute__((noreturn));
+void webcfg_reboot_into_usbcfg(void) __attribute__((noreturn));
+void webcfg_reboot_into_bind(void) __attribute__((noreturn));
 
 /* Set the flag and reset into config mode. Does not return. */
 void webcfg_reboot_into_config(void) __attribute__((noreturn));

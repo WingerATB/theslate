@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
+#include "esp_coexist.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_system.h"
@@ -35,12 +36,15 @@
 
 static const char *TAG = "WEBCFG";
 
-/* Deliberately still "camlink": the product was renamed to SlateFPV, this
- * namespace was not. It is the key under which every shipped module stores
- * its bound camera and settings, and renaming it would silently discard both
- * on the update that did it. A tidier string is not worth a user's setup. */
+/* The NVS namespace stays "camlink" for good -- it happens to match the
+ * project name again, but that is beside the point. It is the key under which
+ * every module stores its bound camera and settings, and renaming it would
+ * silently discard both on the update that did it. */
 #define NVS_NS       "camlink"
 #define NVS_KEY_FLAG "cfgmode"
+#define NVS_KEY_BIND "bindmode"
+#define NVS_KEY_USB  "usbcfgmode"
+#define NVS_KEY_NORMAL "bootnormal"
 
 #define AP_CHANNEL       1
 #define AP_MAX_CONN      2
@@ -85,9 +89,91 @@ void webcfg_reboot_into_config(void)
         nvs_close(h);
     }
     ESP_LOGW(TAG, "rebooting into config mode");
+    duml_cam_disconnect();            /* leave the camera advertising, not waiting */
     vTaskDelay(pdMS_TO_TICKS(120));   /* let the log line drain */
     esp_restart();
     for (;;) { }                      /* esp_restart() does not return */
+}
+
+bool webcfg_bind_flag_take(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    uint8_t v = 0;
+    bool set = (nvs_get_u8(h, NVS_KEY_BIND, &v) == ESP_OK && v != 0);
+    if (set) {
+        nvs_erase_key(h, NVS_KEY_BIND);
+        nvs_commit(h);
+    }
+    nvs_close(h);
+    return set;
+}
+
+bool webcfg_bootnormal_flag_take(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    uint8_t v = 0;
+    bool set = (nvs_get_u8(h, NVS_KEY_NORMAL, &v) == ESP_OK && v != 0);
+    if (set) { nvs_erase_key(h, NVS_KEY_NORMAL); nvs_commit(h); }
+    nvs_close(h);
+    return set;
+}
+
+void webcfg_reboot_into_normal(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, NVS_KEY_NORMAL, 1);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGW(TAG, "rebooting into NORMAL mode for one boot (test)");
+    duml_cam_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(120));
+    esp_restart();
+    for (;;) { }
+}
+
+bool webcfg_usbcfg_flag_take(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    uint8_t v = 0;
+    bool set = (nvs_get_u8(h, NVS_KEY_USB, &v) == ESP_OK && v != 0);
+    if (set) { nvs_erase_key(h, NVS_KEY_USB); nvs_commit(h); }
+    nvs_close(h);
+    return set;
+}
+
+void webcfg_reboot_into_usbcfg(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, NVS_KEY_USB, 1);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGW(TAG, "rebooting into USB-config mode");
+    duml_cam_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(120));
+    esp_restart();
+    for (;;) { }
+}
+
+void webcfg_reboot_into_bind(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, NVS_KEY_BIND, 1);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGW(TAG, "rebooting into bind mode");
+    duml_cam_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(120));
+    esp_restart();
+    for (;;) { }
 }
 
 const char *webcfg_ssid(void) { return s_ssid; }
@@ -174,7 +260,7 @@ static esp_err_t page_get(httpd_req_t *req)
     return httpd_resp_send(req, (const char *)page_start, page_end - page_start);
 }
 
-static esp_err_t state_get(httpd_req_t *req)
+int webcfg_state_json(char *body, size_t cap)
 {
     camlink_cfg_t cfg;
     camlink_cfg_get(&cfg);
@@ -192,8 +278,7 @@ static esp_err_t state_get(httpd_req_t *req)
 
     const esp_app_desc_t *app = esp_app_get_description();
 
-    char body[2048];
-    int  n = snprintf(body, sizeof(body),
+    int  n = snprintf(body, cap,
         "{\"ssid\":\"%s\",\"fw\":\"%s\","
         "\"cfg\":{\"mode\":%u,\"aux\":%d,\"min\":%u,\"max\":%u,\"tx\":%u,\"kind\":%u,\"txauto\":%u,\"cfgaux\":%d,\"cfgkind\":%u,\"cfghold\":%u},"
         "\"cam\":{\"bound\":%s,\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
@@ -216,10 +301,10 @@ static esp_err_t state_get(httpd_req_t *req)
      * this list once hid the user's own arm and record switches, which sat on
      * channels past the cut, and cost an evening of "the button isn't detected". */
     for (unsigned i = 0; i < fc.rc_count && i < MSP_MAX_RC_CHANNELS; i++) {
-        n += snprintf(body + n, sizeof(body) - n, "%s%u", i ? "," : "", fc.rc[i]);
+        n += snprintf(body + n, cap - n, "%s%u", i ? "," : "", fc.rc[i]);
         if (n >= (int)sizeof(body) - 8) break;
     }
-    n += snprintf(body + n, sizeof(body) - n, "]},");
+    n += snprintf(body + n, cap - n, "]},");
 
     /* The OSD field catalogue, straight from the firmware.
      *
@@ -228,24 +313,31 @@ static esp_err_t state_get(httpd_req_t *req)
      * hard-coding it in the page means the two cannot drift: add a field to
      * osd_fields[] and the picker grows a tile for it, with the right budget,
      * without the JavaScript being touched. */
-    n += snprintf(body + n, sizeof(body) - n, "\"osdmax\":%d,\"fields\":[", OSD_ROW_MAX);
+    n += snprintf(body + n, cap - n, "\"osdmax\":%d,\"fields\":[", OSD_ROW_MAX);
     for (int f = 1; f < OSD_F__COUNT; f++) {
-        n += snprintf(body + n, sizeof(body) - n,
+        n += snprintf(body + n, cap - n,
                       "%s{\"id\":%d,\"name\":\"%s\",\"ex\":\"%s\",\"w\":%u}",
                       f > 1 ? "," : "", f, osd_fields[f].name,
                       osd_fields[f].example, (unsigned)osd_fields[f].width);
     }
-    n += snprintf(body + n, sizeof(body) - n, "],\"osd\":[");
+    n += snprintf(body + n, cap - n, "],\"osd\":[");
     for (int r = 0; r < OSD_ROWS; r++) {
-        n += snprintf(body + n, sizeof(body) - n, "%s[", r ? "," : "");
+        n += snprintf(body + n, cap - n, "%s[", r ? "," : "");
         for (int i = 0; i < OSD_ROW_FIELDS; i++) {
-            n += snprintf(body + n, sizeof(body) - n, "%s%u",
+            n += snprintf(body + n, cap - n, "%s%u",
                           i ? "," : "", (unsigned)cfg.osd[r][i]);
         }
-        n += snprintf(body + n, sizeof(body) - n, "]");
+        n += snprintf(body + n, cap - n, "]");
     }
-    n += snprintf(body + n, sizeof(body) - n, "]}");
+    n += snprintf(body + n, cap - n, "]}");
 
+    return n;
+}
+
+static esp_err_t state_get(httpd_req_t *req)
+{
+    char body[2048];
+    int n = webcfg_state_json(body, sizeof(body));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, body, n);
@@ -284,13 +376,8 @@ static bool field_u32(const char *body, const char *key, uint32_t *out)
     return true;
 }
 
-static esp_err_t config_post(httpd_req_t *req)
+const char *webcfg_apply_config(const char *body)
 {
-    char body[192];
-    if (!read_body(req, body, sizeof(body))) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-        return ESP_FAIL;
-    }
 
     /* Validate EVERYTHING before writing ANYTHING. A half-applied form -- new
      * mode saved, out-of-range channel rejected -- leaves the module in a state
@@ -302,22 +389,27 @@ static esp_err_t config_post(httpd_req_t *req)
         !field_u32(body, "tx", &tx)     || !field_u32(body, "kind", &kind) ||
         !field_u32(body, "txauto", &txauto) || !field_u32(body, "cfgaux", &cfgaux) ||
         !field_u32(body, "cfgkind", &cfgkind) || !field_u32(body, "cfghold", &cfghold)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing field");
-        return ESP_FAIL;
+        return "missing field";
     }
     /* The same limits the config store enforces, by name rather than by two
      * copies of the digits. They disagreed once -- this handler accepted
      * 900-2100 while the store still rejected anything outside 1000-2000, so a
      * legitimate form came back 500 with the mode already written and the
      * window not. Sharing the constants is what stops that recurring. */
-    if (mode >= CFG_MODE__COUNT || tx >= CFG_TX__COUNT || kind > CFG_SW_BUTTON ||
-        txauto > 1 || cfgaux > 14 || cfgkind > CFG_SW_BUTTON ||
-        cfghold > CAMLINK_CFG_HOLD_DS_MAX ||
-        aux < 1 || aux > 14 ||
-        lo < CAMLINK_RC_US_MIN || hi > CAMLINK_RC_US_MAX || lo >= hi) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "out of range");
-        return ESP_FAIL;
-    }
+    /* Named checks: a vague "out of range" cost an afternoon of guessing which
+     * of ten fields was the problem. Each says which one. */
+    if (mode >= CFG_MODE__COUNT)                 return "mode out of range";
+    if (tx >= CFG_TX__COUNT)                     return "radio power out of range";
+    if (kind > CFG_SW_BUTTON)                    return "control type out of range";
+    if (txauto > 1)                              return "turn-down-while-flying out of range";
+    if (aux < 1 || aux > 14)                     return "AUX channel out of range";
+    if (lo < CAMLINK_RC_US_MIN || hi > CAMLINK_RC_US_MAX)
+                                                 return "record window out of the 900-2100 range";
+    if (lo >= hi)                                return "record window: lower edge is not below the upper";
+    if (cfgaux > 14)                             return "setup channel out of range";
+    if (cfgkind > CFG_SW_BUTTON)                 return "setup control type out of range";
+    if (cfghold > CAMLINK_CFG_HOLD_DS_MAX)       return "setup hold time out of range";
+    /* Optional: older pages do not send it, so it stays 0 (off). */
 
     bool ok = camlink_cfg_set_mode((uint8_t)mode)
            && camlink_cfg_set_channel(cfg_aux_to_index((uint8_t)aux))
@@ -331,9 +423,20 @@ static esp_err_t config_post(httpd_req_t *req)
            && camlink_cfg_set_config_hold((uint8_t)cfghold);
 
     if (!ok) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save failed");
+        return "save failed";
+    }
+    return NULL;
+}
+
+static esp_err_t config_post(httpd_req_t *req)
+{
+    char body[192];
+    if (!read_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
         return ESP_FAIL;
     }
+    const char *err = webcfg_apply_config(body);
+    if (err) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err); return ESP_FAIL; }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
@@ -343,17 +446,11 @@ static esp_err_t config_post(httpd_req_t *req)
  * Kept separate from /api/config because the two are edited independently and
  * a failed layout must not be able to reject a radio-power change the user made
  * in the same visit. */
-static esp_err_t osd_post(httpd_req_t *req)
+const char *webcfg_apply_osd(const char *body)
 {
-    char body[192];
-    if (!read_body(req, body, sizeof(body))) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-        return ESP_FAIL;
-    }
     char v[128];
     if (httpd_query_key_value(body, "osd", v, sizeof(v)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing osd");
-        return ESP_FAIL;
+        return "missing osd";
     }
     url_decode(v);   /* the separators arrive as %2C */
 
@@ -363,8 +460,7 @@ static esp_err_t osd_post(httpd_req_t *req)
         char *end = NULL;
         unsigned long id = strtoul(p, &end, 10);
         if (end == p || id >= OSD_F__COUNT) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad field id");
-            return ESP_FAIL;
+            return "bad field id";
         }
         osd[i / OSD_ROW_FIELDS][i % OSD_ROW_FIELDS] = (uint8_t)id;
         p = (*end == ',') ? end + 1 : end;
@@ -373,9 +469,20 @@ static esp_err_t osd_post(httpd_req_t *req)
     /* camlink_cfg_set_osd() re-checks the budget. The page checks it too, but
      * the page is not the only thing that can post here. */
     if (!camlink_cfg_set_osd((const uint8_t (*)[OSD_ROW_FIELDS])osd)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "row too long");
+        return "row too long";
+    }
+    return NULL;
+}
+
+static esp_err_t osd_post(httpd_req_t *req)
+{
+    char body[192];
+    if (!read_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
         return ESP_FAIL;
     }
+    const char *err = webcfg_apply_osd(body);
+    if (err) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err); return ESP_FAIL; }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
@@ -399,7 +506,7 @@ static esp_err_t repair_post(httpd_req_t *req)
 
 /* The live camera list. Polled by the page while the user is looking at it, so
  * a camera switched on after the page loaded still turns up. */
-static esp_err_t scan_get(httpd_req_t *req)
+int webcfg_scan_json(char *body, size_t cap)
 {
     cam_scan_entry_t cams[CAM_SCAN_MAX];
     int n = cam_scan_get(cams, CAM_SCAN_MAX);
@@ -407,8 +514,7 @@ static esp_err_t scan_get(httpd_req_t *req)
     uint8_t bound_mac[6];
     bool bound = duml_cam_bound_addr(bound_mac);
 
-    char body[1400];
-    int  w = snprintf(body, sizeof(body), "{\"cams\":[");
+    int  w = snprintf(body, cap, "{\"cams\":[");
 
     for (int i = 0; i < n; i++) {
         const cam_scan_entry_t *c = &cams[i];
@@ -417,19 +523,27 @@ static esp_err_t scan_get(httpd_req_t *req)
          * page shows nothing at all, which is a worse answer than a short
          * list. CAM_SCAN_MAX is 12 and each entry is ~80 bytes, so this is a
          * backstop, not the normal path. */
-        if (w > (int)sizeof(body) - 160) break;
-        w += snprintf(body + w, sizeof(body) - w,
+        if (w > (int)cap - 160) break;
+        w += snprintf(body + w, cap - w,
             "%s{\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
             "\"id\":\"%02X%02X%02X%02X%02X%02X\",\"name\":\"%s\","
-            "\"model\":\"%s\",\"rssi\":%d,\"bound\":%s}",
+            "\"model\":\"%s\",\"vendor\":\"%s\",\"rssi\":%d,\"bound\":%s}",
             i ? "," : "",
             c->bda[0], c->bda[1], c->bda[2], c->bda[3], c->bda[4], c->bda[5],
             c->bda[0], c->bda[1], c->bda[2], c->bda[3], c->bda[4], c->bda[5],
-            c->name, cam_scan_model_name(c->model), c->rssi,
+            c->name, cam_scan_entry_model(c),
+            c->vendor == CAM_VENDOR_GOPRO ? "gopro" : "dji", c->rssi,
             (bound && memcmp(bound_mac, c->bda, 6) == 0) ? "true" : "false");
     }
-    w += snprintf(body + w, sizeof(body) - w, "]}");
+    w += snprintf(body + w, cap - w, "]}");
 
+    return w;
+}
+
+static esp_err_t scan_get(httpd_req_t *req)
+{
+    char body[1400];
+    int w = webcfg_scan_json(body, sizeof(body));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, body, w);
@@ -461,19 +575,13 @@ static bool parse_mac(const char *s, uint8_t out[6])
     return true;
 }
 
-static esp_err_t bind_post(httpd_req_t *req)
+const char *webcfg_apply_bind(const char *body)
 {
-    char body[96];
-    if (!read_body(req, body, sizeof(body))) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-        return ESP_FAIL;
-    }
     char macstr[16];
     uint8_t mac[6];
     if (httpd_query_key_value(body, "mac", macstr, sizeof(macstr)) != ESP_OK ||
         !parse_mac(macstr, mac)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad mac");
-        return ESP_FAIL;
+        return "bad mac";
     }
 
     /* Only bind to something the scanner can actually see right now. This is
@@ -483,10 +591,14 @@ static esp_err_t bind_post(httpd_req_t *req)
     int n = cam_scan_get(cams, CAM_SCAN_MAX);
     bool visible = false;
     uint8_t model = 0;
+    uint8_t vendor = CAM_VENDOR_DJI;
+    uint8_t addr_type = 0;
     const char *name = NULL;
     for (int i = 0; i < n; i++) {
         if (memcmp(cams[i].bda, mac, 6) == 0) {
             visible = true;
+            vendor = cams[i].vendor;
+            addr_type = cams[i].addr_type;
             /* The model code decides which protocol the module will speak to
              * this camera, so it is stored with the binding rather than being
              * rediscovered at connect time -- by then we are already choosing. */
@@ -496,11 +608,22 @@ static esp_err_t bind_post(httpd_req_t *req)
         }
     }
     if (!visible) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "camera not in range");
-        return ESP_FAIL;
+        return "camera not in range";
     }
 
-    duml_cam_set_binding(mac, model, name);
+    duml_cam_set_binding(mac, model, name, vendor, addr_type);
+    return NULL;
+}
+
+static esp_err_t bind_post(httpd_req_t *req)
+{
+    char body[96];
+    if (!read_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_FAIL;
+    }
+    const char *err = webcfg_apply_bind(body);
+    if (err) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err); return ESP_FAIL; }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
@@ -528,7 +651,7 @@ static void reboot_task(void *arg);   /* defined with the exit handler below */
                         sizeof(esp_image_segment_header_t) + \
                         sizeof(esp_app_desc_t))
 
-/* Refuse anything that is not a Slate image for this chip, BEFORE a byte of
+/* Refuse anything that is not a SlateFPV image for this chip, BEFORE a byte of
  * it reaches the slot. Without this, picking the wrong file in a phone's file
  * browser -- a photo, the merged full-flash image, firmware for another board
  * -- would half-write the spare slot and then be booted into. */
@@ -633,7 +756,7 @@ static esp_err_t update_post(httpd_req_t *req)
                 free(buf);
                 esp_ota_abort(h);
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                    "not a Slate firmware image");
+                                    "not a SlateFPV firmware image");
                 return ESP_FAIL;
             }
             checked = true;
@@ -829,9 +952,26 @@ static void wifi_start(void)
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
-    ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "AP \"%s\" up, settings at http://%s/", s_ssid, AP_IP);
+    /* Give the access point the radio.
+     *
+     * Config mode runs the BLE camera scanner and this access point on one
+     * antenna, arbitrated by the coexistence layer. Left in balance, an active
+     * BLE scan transmits often enough to starve the softAP's beacons -- the
+     * camera list stays fine while the network the user is trying to join
+     * never appears, which is exactly the wrong way round: the page is what
+     * they came for, and the scan can miss a few adverts without anyone
+     * noticing. So Wi-Fi is preferred here, and power save is off so the
+     * beacon goes out on time rather than being deferred. */
+    esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    ESP_ERROR_CHECK(esp_wifi_start());
+    /* softAP TX at full power: the phone is across a room, not centimetres
+     * away like the camera, and this radio is only up on the ground. */
+    esp_wifi_set_max_tx_power(78);
+
+    ESP_LOGI(TAG, "AP \"%s\" up on ch %d, settings at http://%s/", s_ssid, AP_CHANNEL, AP_IP);
 }
 
 void webcfg_start(void)

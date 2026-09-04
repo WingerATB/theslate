@@ -3,7 +3,7 @@
  * Config-mode camera scanner.
  *
  * Discovery only: this brings up the BLE controller and GAP, watches for DJI
- * camera advertisements, and keeps a short list of what it can see. It never
+ * and GoPro camera advertisements, and keeps a short list of what it can see. It never
  * connects. Connecting is what the normal boot does, and keeping the two apart
  * means the settings page cannot accidentally take over a camera while the
  * user is only looking at a list.
@@ -21,9 +21,11 @@
 #include "cam_scan.h"
 #include "ble.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_bt.h"
@@ -61,11 +63,15 @@ static esp_ble_scan_params_t s_scan_params = {
                                                      the name often lives there */
     .own_addr_type      = BLE_ADDR_TYPE_PUBLIC,
     .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-    /* 30 ms of every 100 ms. Enough to find a camera 20 cm away within a
-     * second or two, while leaving the radio to the access point the rest of
-     * the time. */
+    /* 60 ms of every 100 ms: aggressive, because the scanner no longer runs
+     * alongside Wi-Fi. On this chip an enabled Bluetooth controller starves
+     * the softAP's beacon no matter how little it scans, so config mode now
+     * takes a short camera census with Wi-Fi still down, THEN shuts Bluetooth
+     * off entirely and brings the access point up alone (see cam_scan_stop and
+     * config_mode). With the air to itself, the scan may as well be quick: a
+     * 60% window finds a camera on the desk in well under a second. */
     .scan_interval      = 0x00A0,
-    .scan_window        = 0x0030,
+    .scan_window        = 0x0060,
     .scan_duplicate     = BLE_SCAN_DUPLICATE_DISABLE,  /* we want RSSI updates */
 };
 
@@ -105,7 +111,82 @@ const char *cam_scan_model_name(uint8_t model)
     }
 }
 
-static void upsert(const uint8_t *bda, const char *name, int8_t rssi, uint8_t model)
+const char *cam_scan_entry_model(const cam_scan_entry_t *e)
+{
+    if (e->vendor == CAM_VENDOR_GOPRO) return "GoPro";
+    return cam_scan_model_name(e->model);
+}
+
+/* --------------------------------------------------------------------------
+ * GoPro adverts.
+ *
+ * Per the Open GoPro BLE spec a camera advertises the 16-bit service UUID
+ * 0xFEA6 and manufacturer data under GoPro's company ID 0x02F2, and its scan
+ * response carries the name, "GoPro 1234". Any one of the three is accepted:
+ * the adverts and the scan response arrive as separate events, the name lives
+ * only in the latter, and a filter that demanded all three at once would
+ * reject the very advert that proves the camera is there.
+ *
+ * The HERO (2024) this is being brought up against is not on Open GoPro's
+ * supported list, so what it actually advertises is the first thing worth
+ * knowing -- which is why a GoPro's first sighting logs its raw manufacturer
+ * bytes below, where the DJI line logs a model code.
+ * -------------------------------------------------------------------------- */
+#define GOPRO_SVC_UUID16   0xFEA6
+#define GOPRO_COMPANY_ID   0x02F2
+
+static bool is_gopro_adv(const uint8_t *adv, uint8_t adv_len)
+{
+    for (int i = 0; i < adv_len; ) {
+        const uint8_t len = adv[i];
+        if (len == 0 || (i + len + 1) > adv_len) break;
+        const uint8_t  type = adv[i + 1];
+        const uint8_t *d    = &adv[i + 2];
+        const uint8_t  dlen = len - 1;
+
+        if (type == ESP_BLE_AD_TYPE_16SRV_PART || type == ESP_BLE_AD_TYPE_16SRV_CMPL) {
+            for (int k = 0; k + 1 < dlen; k += 2) {
+                if (d[k] == (GOPRO_SVC_UUID16 & 0xFF) && d[k + 1] == (GOPRO_SVC_UUID16 >> 8)) {
+                    return true;
+                }
+            }
+        } else if (type == ESP_BLE_AD_MANUFACTURER_SPECIFIC_TYPE) {
+            /* Company ID is little-endian on the air. The other order is
+             * accepted too: the spec writes it as "0xF202", and if a firmware
+             * takes that literally, rejecting it would hide the camera. */
+            if (dlen >= 2 &&
+                ((d[0] == (GOPRO_COMPANY_ID & 0xFF) && d[1] == (GOPRO_COMPANY_ID >> 8)) ||
+                 (d[1] == (GOPRO_COMPANY_ID & 0xFF) && d[0] == (GOPRO_COMPANY_ID >> 8)))) {
+                return true;
+            }
+        } else if (type == ESP_BLE_AD_TYPE_NAME_CMPL || type == ESP_BLE_AD_TYPE_NAME_SHORT) {
+            if (dlen >= 5 && memcmp(d, "GoPro", 5) == 0) return true;
+        }
+        i += len + 1;
+    }
+    return false;
+}
+
+/* The manufacturer payload as hex, for the first-sighting log. */
+static void mfg_hex(const uint8_t *adv, uint8_t adv_len, char *out, size_t out_len)
+{
+    out[0] = '\0';
+    for (int i = 0; i < adv_len; ) {
+        const uint8_t len = adv[i];
+        if (len == 0 || (i + len + 1) > adv_len) break;
+        if (adv[i + 1] == ESP_BLE_AD_MANUFACTURER_SPECIFIC_TYPE) {
+            size_t w = 0;
+            for (uint8_t k = 0; k < len - 1 && w + 3 < out_len; k++) {
+                w += (size_t)snprintf(out + w, out_len - w, "%02X ", adv[i + 2 + k]);
+            }
+            return;
+        }
+        i += len + 1;
+    }
+}
+
+static void upsert(const uint8_t *bda, const char *name, int8_t rssi, uint8_t model,
+                   cam_vendor_t vendor, const char *mfg, uint8_t addr_type)
 {
     if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return;
 
@@ -136,10 +217,18 @@ static void upsert(const uint8_t *bda, const char *name, int8_t rssi, uint8_t mo
         /* Raw model byte included deliberately: it is the first thing needed
          * when bringing up a camera this firmware has never seen, and without
          * it an unrecognised model logs an empty string and tells you nothing. */
-        ESP_LOGI(TAG, "found %02X:%02X:%02X:%02X:%02X:%02X  %-18s model=0x%02X %-18s %d dBm",
-                 bda[0], bda[1], bda[2], bda[3], bda[4], bda[5],
-                 (name && name[0]) ? name : "(no name)",
-                 model, cam_scan_model_name(model), rssi);
+        if (vendor == CAM_VENDOR_GOPRO) {
+            ESP_LOGI(TAG, "found %02X:%02X:%02X:%02X:%02X:%02X  %-18s GoPro mfg=[%s] %d dBm",
+                     bda[0], bda[1], bda[2], bda[3], bda[4], bda[5],
+                     (name && name[0]) ? name : "(no name)", mfg, rssi);
+        } else {
+            ESP_LOGI(TAG, "found %02X:%02X:%02X:%02X:%02X:%02X  %-18s model=0x%02X %-18s %d dBm",
+                     bda[0], bda[1], bda[2], bda[3], bda[4], bda[5],
+                     (name && name[0]) ? name : "(no name)",
+                     model, cam_scan_model_name(model), rssi);
+        }
+        s_tbl[slot].vendor    = (uint8_t)vendor;
+        s_tbl[slot].addr_type = addr_type;
     }
 
     s_tbl[slot].rssi    = rssi;
@@ -174,6 +263,7 @@ static void scan_kick(void)
     }
 }
 
+
 /* Restart a scan that has gone quiet.
  *
  * Deliberately not conditional on having ever seen a camera: in a room with no
@@ -193,6 +283,54 @@ static void scan_watchdog(void *arg)
     s_last_result_ms = scan_now_ms();
     esp_ble_gap_stop_scanning();   /* STOP_COMPLETE restarts it */
     scan_kick();                   /* ...and if no event arrives, this does */
+}
+
+/* --------------------------------------------------------------------------
+ * Raw advert sniffer (diagnostic).
+ *
+ * Logs every BLE device heard, once each, with its name, address, signal, the
+ * full advertising payload and whether it is connectable. This exists to bring
+ * up a camera the vendor filters do not yet recognise -- an older GoPro, say --
+ * by showing exactly what it broadcasts, so the filter can be taught to match
+ * it. Bounded to one line per address so a busy room does not flood the log.
+ * -------------------------------------------------------------------------- */
+static uint8_t s_sniff[24][6];
+static int     s_sniff_n;
+
+static bool sniff_seen(const uint8_t *bda)
+{
+    for (int i = 0; i < s_sniff_n; i++) if (memcmp(s_sniff[i], bda, 6) == 0) return true;
+    if (s_sniff_n < (int)(sizeof(s_sniff) / 6)) { memcpy(s_sniff[s_sniff_n++], bda, 6); }
+    return false;
+}
+
+static void sniff_advert(esp_ble_gap_cb_param_t *param)
+{
+    const uint8_t *bda = param->scan_rst.bda;
+    if (sniff_seen(bda)) return;
+
+    uint8_t adv_len = param->scan_rst.adv_data_len + param->scan_rst.scan_rsp_len;
+    const uint8_t *adv = param->scan_rst.ble_adv;
+
+    uint8_t nlen = 0;
+    uint8_t *nm = esp_ble_resolve_adv_data_by_type(adv, adv_len, ESP_BLE_AD_TYPE_NAME_CMPL, &nlen);
+    if (!nm || !nlen) nm = esp_ble_resolve_adv_data_by_type(adv, adv_len, ESP_BLE_AD_TYPE_NAME_SHORT, &nlen);
+    char name[32] = "(no name)";
+    if (nm && nlen) { size_t c = nlen < sizeof(name) - 1 ? nlen : sizeof(name) - 1; memcpy(name, nm, c); name[c] = 0; }
+
+    char hex[3 * 62 + 4];
+    size_t w = 0;
+    for (int i = 0; i < adv_len && i < 62 && w + 3 < sizeof(hex); i++) {
+        w += (size_t)snprintf(hex + w, sizeof(hex) - w, "%02X ", adv[i]);
+    }
+
+    bool conn = param->scan_rst.ble_evt_type == ESP_BLE_EVT_CONN_ADV ||
+                param->scan_rst.ble_evt_type == ESP_BLE_EVT_CONN_DIR_ADV;
+
+    ESP_LOGW(TAG, "SNIFF %02X:%02X:%02X:%02X:%02X:%02X %-16s %4d dBm %s atype=%d %s",
+             bda[0], bda[1], bda[2], bda[3], bda[4], bda[5], name,
+             param->scan_rst.rssi, conn ? "connectable" : "not-conn",
+             param->scan_rst.ble_addr_type, hex);
 }
 
 static void gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
@@ -220,9 +358,21 @@ static void gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
         /* Counted BEFORE the camera filter: any advert at all proves the radio
          * is still listening, which is the only thing the watchdog needs. */
         s_last_result_ms = scan_now_ms();
-        if (!bsp_link_is_dji_camera_adv(param)) break;
-
         uint8_t adv_len = param->scan_rst.adv_data_len + param->scan_rst.scan_rsp_len;
+
+#if CONFIG_CAMLINK_SNIFF
+        sniff_advert(param);
+#endif
+
+        cam_vendor_t vendor;
+        if (bsp_link_is_dji_camera_adv(param)) {
+            vendor = CAM_VENDOR_DJI;
+        } else if (is_gopro_adv(param->scan_rst.ble_adv, adv_len)) {
+            vendor = CAM_VENDOR_GOPRO;
+        } else {
+            break;
+        }
+
         uint8_t nlen = 0;
         uint8_t *n = esp_ble_resolve_adv_data_by_type(param->scan_rst.ble_adv, adv_len,
                                                       ESP_BLE_AD_TYPE_NAME_CMPL, &nlen);
@@ -235,15 +385,18 @@ static void gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
             size_t c = nlen < sizeof(name) - 1 ? nlen : sizeof(name) - 1;
             memcpy(name, n, c);
         }
+        char mfg[3 * 31 + 1] = "";
+        if (vendor == CAM_VENDOR_GOPRO) mfg_hex(param->scan_rst.ble_adv, adv_len, mfg, sizeof(mfg));
         upsert(param->scan_rst.bda, name, param->scan_rst.rssi,
-               model_code(param->scan_rst.ble_adv, adv_len));
+               model_code(param->scan_rst.ble_adv, adv_len), vendor, mfg,
+               (uint8_t)param->scan_rst.ble_addr_type);
         break;
     }
 
     case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
-        /* Keep looking. The list has to stay live while the user reads it --
-         * a camera switched on while they are looking at the page has to turn
-         * up without them having to leave and come back. */
+        /* Keep looking while config mode wants a census. cam_scan_stop() sets
+         * s_running false before tearing Bluetooth down, so a stop that is
+         * really the shutdown is not restarted here. */
         if (s_running) scan_kick();
         break;
 
@@ -290,6 +443,34 @@ esp_err_t cam_scan_start(void)
     return ESP_OK;
 }
 
+/* Stop scanning and free the Bluetooth controller entirely.
+ *
+ * This exists because, on this chip, an ENABLED Bluetooth controller starves
+ * the Wi-Fi access point's beacon even when it is not scanning -- so config
+ * mode cannot leave it running behind the settings page. The captured camera
+ * list (s_tbl) is deliberately kept: the picker still shows what the census
+ * found, and binding validates against it. A reboot back into config mode
+ * takes a fresh census. */
+void cam_scan_stop(void)
+{
+    if (!s_running) return;
+    s_running = false;
+
+    if (s_watchdog) {
+        esp_timer_stop(s_watchdog);
+        esp_timer_delete(s_watchdog);
+        s_watchdog = NULL;
+    }
+    esp_ble_gap_stop_scanning();
+    vTaskDelay(pdMS_TO_TICKS(60));   /* let STOP_COMPLETE land before teardown */
+
+    esp_bluedroid_disable();
+    esp_bluedroid_deinit();
+    esp_bt_controller_disable();
+    esp_bt_controller_deinit();
+    ESP_LOGI(TAG, "camera census done, Bluetooth off -- Wi-Fi has the radio");
+}
+
 int cam_scan_get(cam_scan_entry_t *out, int max)
 {
     if (out == NULL || max <= 0 || s_lock == NULL) return 0;
@@ -297,15 +478,20 @@ int cam_scan_get(cam_scan_entry_t *out, int max)
 
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
 
-    /* Drop anything gone quiet, compacting in place. */
-    int keep = 0;
-    for (int i = 0; i < s_count; i++) {
-        if ((now - s_tbl[i].last_ms) <= FORGET_MS) {
-            if (keep != i) s_tbl[keep] = s_tbl[i];
-            keep++;
+    /* Drop anything gone quiet, compacting in place -- but only while actually
+     * scanning. Once cam_scan_stop() has powered Bluetooth down, no advert can
+     * refresh an entry, so aging here would empty the picker a few seconds
+     * after setup opened. A stopped scan is a frozen census: show all of it. */
+    if (s_running) {
+        int keep = 0;
+        for (int i = 0; i < s_count; i++) {
+            if ((now - s_tbl[i].last_ms) <= FORGET_MS) {
+                if (keep != i) s_tbl[keep] = s_tbl[i];
+                keep++;
+            }
         }
+        s_count = keep;
     }
-    s_count = keep;
 
     int n = s_count < max ? s_count : max;
     memcpy(out, s_tbl, (size_t)n * sizeof(cam_scan_entry_t));

@@ -36,11 +36,17 @@ typedef struct {
     uint8_t  battery_pct;    /* CANDIDATE -- not confirmed by measurement    */
     bool     battery_valid;
 
+    uint8_t  hot;            /* 0 ok, 1 warn, 2 too hot -- GoPro reports it,
+                              * DUML never has                               */
+    bool     hot_valid;
+
     /* Short name for the OSD: NANO, O360, A5... Resolved when the camera was
      * chosen and stored with the binding, because the advertised name -- the
      * only thing that identifies an Osmo Action 6, whose model code is not
      * published -- is long gone by the time we connect to it. */
     char     label[6];
+    char     res[8];         /* video resolution label; GoPro only, else ""  */
+    char     fps[8];         /* framerate label; GoPro only, else ""         */
 } duml_cam_status_t;
 
 void duml_cam_start(void);
@@ -62,7 +68,15 @@ void duml_cam_forget_binding(void);
  * takes effect on the next normal boot, which is also when the pairing PIN
  * appears on the camera. */
 void duml_cam_set_binding(const uint8_t addr[6], uint8_t model,
-                          const char *name);
+                          const char *name, uint8_t vendor, uint8_t addr_type);
+
+/* True when the bound camera is a GoPro, in which case duml_cam is a facade
+ * over gopro_cam and none of the DUML machinery runs. */
+bool duml_cam_is_gopro(void);
+
+/* Close the camera link cleanly, for the moment before a deliberate reboot.
+ * Returns once the link is down or a short wait has passed. */
+void duml_cam_disconnect(void);
 
 /* Advertised model code of the bound camera, 0 if unknown. The protocol the
  * module speaks is derived from this, so it is stored with the binding. */
@@ -71,6 +85,9 @@ void duml_cam_get(duml_cam_status_t *out);
 
 /* Ask the camera to start/stop. Executed by the camera task. */
 void duml_cam_request_record(bool on);
+
+/* Tag a HiLight moment on the bound camera (GoPro only; no-op otherwise). */
+void duml_cam_request_hilight(void);
 
 
 

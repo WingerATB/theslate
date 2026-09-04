@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: PolyForm-Strict-1.0.0
  *
- * SlateFPV -- DJI Osmo Nano camera link for Betaflight.
+ * SlateFPV -- action-camera link for Betaflight (DJI Osmo + GoPro).
  *
  * Three FreeRTOS tasks, none of which may block the others:
  *
@@ -39,6 +39,7 @@
 #include "nvs_flash.h"
 #include "webcfg.h"
 #include "cam_scan.h"
+#include "usbcli.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
@@ -112,8 +113,9 @@ static void on_button(ui_button_event_t evt)
      * knowing when the button "does not work", and it separates a dead button
      * from a command the camera ignored. */
     ESP_LOGW(TAG, "button: %s",
-             evt == UI_BTN_SHORT ? "short" :
-             evt == UI_BTN_LONG  ? "long"  : "very long");
+             evt == UI_BTN_SHORT        ? "short" :
+             evt == UI_BTN_LONG         ? "long"  :
+             evt == UI_BTN_LONG_RELEASE ? "long, released" : "very long");
 
     if (evt == UI_BTN_VERY_LONG) {
         /* Held straight through the bind threshold. Bind mode only cleared the
@@ -129,11 +131,22 @@ static void on_button(ui_button_event_t evt)
     }
 
     if (evt == UI_BTN_LONG) {
-        /* Three seconds used to start bind mode. Cameras are now chosen in
-         * setup, so this is only the halfway mark -- say so rather than
-         * leaving the user holding a button that appears to do nothing. */
-        ESP_LOGI(TAG, "keep holding to 10 s for setup");
+        /* Three seconds in. Let go here to bind the nearest camera; keep
+         * holding to reach setup. Nothing happens at this mark itself. */
+        ESP_LOGI(TAG, "release now to bind the nearest camera, or keep holding to 10 s for setup");
         return;
+    }
+
+    if (evt == UI_BTN_LONG_RELEASE) {
+        /* Same guard as setup: bind mode is a reboot with no camera link and
+         * no MSP, so it must never start on an armed aircraft. */
+        msp_state_t ms;
+        msp_get_state(&ms);
+        if (!camlink_may_enter_setup(ms.link_up, ms.boxarm_known, ms.armed)) {
+            ESP_LOGW(TAG, "bind refused: the aircraft is armed");
+            return;
+        }
+        webcfg_reboot_into_bind();
     }
 
     /* A test button, so it answers to the person holding it.
@@ -407,6 +420,141 @@ static void config_osd_task(void *arg)
     }
 }
 
+/* --------------------------------------------------------------------------
+ * Bind mode: choose the nearest camera from the button alone.
+ *
+ * A separate boot, like setup, because the scanner and the camera session
+ * cannot share the BLE controller, and because a bind that could happen
+ * mid-flight is a bind that eventually will.
+ *
+ * "Nearest" is guarded, not assumed. This firmware once adopted whichever
+ * camera advertised loudest, and with a second camera in range it picked the
+ * wrong one with no way to tell. So the strongest camera is bound only when
+ * it is genuinely close AND clearly ahead of anything else, and has stayed
+ * that way for a couple of seconds. Anything less and the module says why on
+ * the console and goes back to normal with its binding untouched -- the
+ * settings page is always there for the ambiguous case.
+ *
+ * For a GoPro this is also the moment to have the camera in pairing mode: the
+ * reboot that follows makes the first connection, and that is where the bond
+ * is formed.
+ * -------------------------------------------------------------------------- */
+#define BIND_WINDOW_MS     30000
+#define BIND_MIN_RSSI      (-75)   /* on the desk, tens of centimetres away   */
+#define BIND_MIN_GAP_DB    12      /* the runner-up must be clearly further    */
+#define BIND_STABLE_POLLS  4       /* same winner for 2 s of 500 ms polls      */
+
+static void on_button_bind(ui_button_event_t evt)
+{
+    (void)evt;
+    ESP_LOGW(TAG, "bind cancelled by the button");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
+}
+
+static void bind_mode(void)
+{
+    ESP_LOGW(TAG, "BIND MODE: looking for the nearest camera for %d s", BIND_WINDOW_MS / 1000);
+    ui_init(on_button_bind);
+    ui_set_led(UI_LED_BINDING);
+    usbcli_start(true);
+
+    esp_err_t e = cam_scan_start();
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "camera scan failed to start: %s", esp_err_to_name(e));
+        vTaskDelay(pdMS_TO_TICKS(200));
+        esp_restart();
+    }
+
+    uint8_t     stable_mac[6] = {0};
+    int         stable        = 0;
+    const char *verdict       = "no camera in range";
+    const char *said          = NULL;
+    const uint32_t t0 = (uint32_t)(esp_timer_get_time() / 1000);
+
+    while ((uint32_t)(esp_timer_get_time() / 1000) - t0 < BIND_WINDOW_MS) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        cam_scan_entry_t cams[CAM_SCAN_MAX];
+        int n = cam_scan_get(cams, CAM_SCAN_MAX);
+
+        int best = -1, second = -1;
+        for (int i = 0; i < n; i++) {
+            if (best < 0 || cams[i].rssi > cams[best].rssi) { second = best; best = i; }
+            else if (second < 0 || cams[i].rssi > cams[second].rssi) { second = i; }
+        }
+
+        if (best < 0) {
+            verdict = "no camera in range"; stable = 0;
+        } else if (cams[best].rssi < BIND_MIN_RSSI) {
+            verdict = "nearest camera is too far -- hold it against the module"; stable = 0;
+        } else if (second >= 0 && (cams[best].rssi - cams[second].rssi) < BIND_MIN_GAP_DB) {
+            verdict = "two cameras equally close -- move one away, or pick in setup"; stable = 0;
+        } else if (memcmp(stable_mac, cams[best].bda, 6) != 0) {
+            memcpy(stable_mac, cams[best].bda, 6);
+            stable = 1;
+            verdict = "candidate found, confirming";
+        } else if (++stable >= BIND_STABLE_POLLS) {
+            const cam_scan_entry_t *c = &cams[best];
+            duml_cam_set_binding(c->bda, c->model, c->name, c->vendor, c->addr_type);
+            ESP_LOGW(TAG, "bound %s %02X:%02X:%02X:%02X:%02X:%02X at %d dBm -- rebooting to connect",
+                     c->name[0] ? c->name : (c->vendor == CAM_VENDOR_GOPRO ? "GoPro" : "DJI camera"),
+                     c->bda[0], c->bda[1], c->bda[2], c->bda[3], c->bda[4], c->bda[5], c->rssi);
+            ui_set_led(UI_LED_CONNECTED);
+            vTaskDelay(pdMS_TO_TICKS(1500));
+            esp_restart();
+        }
+        if (verdict != said) { said = verdict; ESP_LOGI(TAG, "bind: %s", verdict); }
+    }
+
+    ESP_LOGW(TAG, "bind gave up: %s. Binding unchanged.", verdict);
+    ui_set_led(UI_LED_UNPAIRED);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+}
+
+/* --------------------------------------------------------------------------
+ * USB-config mode: the settings UI, driven over the USB cable.
+ *
+ * Same job as config_mode, but the transport is the USB serial API (see the
+ * `api` command in usbcli) instead of a Wi-Fi access point, and there is no
+ * Wi-Fi at all. That is the whole point: on this chip Bluetooth and Wi-Fi
+ * share one antenna and an enabled Bluetooth controller starves the softAP,
+ * which is why the Wi-Fi picker had to freeze the camera list. With Wi-Fi out
+ * of the way the BLE scanner runs continuously, so a browser on the far end of
+ * the cable gets a genuinely live camera list while it edits settings.
+ * -------------------------------------------------------------------------- */
+static void usbcfg_mode(void)
+{
+    ESP_LOGW(TAG, "USB-CONFIG MODE: settings over the USB serial API, no Wi-Fi");
+    ui_init(on_button_config);       /* a long press still leaves */
+    ui_set_led(UI_LED_CONFIG);
+
+    msp_config_t mcfg = {
+        .uart_num        = MSP_UART_NUM,
+        .tx_gpio         = MSP_TX_GPIO,
+        .rx_gpio         = MSP_RX_GPIO,
+        .baud            = MSP_BAUD,
+        .link_timeout_ms = MSP_LINK_TIMEOUT_MS,
+    };
+    if (msp_init(&mcfg) == ESP_OK) {
+        xTaskCreate(msp_task, "msp", 4096, NULL, 6, NULL);
+    }
+
+    camlink_cfg_init();
+
+    camlink_cfg_t c;
+    camlink_cfg_get(&c);
+    camlink_ble_set_tx_level(tx_level_for(c.tx_power));
+
+    esp_err_t e = cam_scan_start();
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "camera scan failed to start: %s", esp_err_to_name(e));
+    }
+
+    usbcli_start(true);
+    ESP_LOGW(TAG, "connect the browser tool over USB serial; hold the button to leave");
+}
+
 static void config_mode(void)
 {
     ESP_LOGW(TAG, "CONFIG MODE: Wi-Fi access point + BLE camera scan");
@@ -429,10 +577,16 @@ static void config_mode(void)
      * store has to be live even though the record state machine is not. */
     camlink_cfg_init();
 
-    /* Scanner before the access point: the BLE controller wants its memory
-     * while the heap is least fragmented, and if it cannot start we would
-     * rather find out before advertising a settings page whose camera list
-     * would silently stay empty. */
+    /* A short camera census, THEN Wi-Fi alone.
+     *
+     * The two radios cannot both be live on this board: an enabled Bluetooth
+     * controller starves the Wi-Fi access point's beacon, so a settings page
+     * served with Bluetooth still up is invisible to the phone trying to reach
+     * it. So config mode scans for a couple of seconds to populate the picker,
+     * powers Bluetooth all the way down, and only then raises the access point
+     * -- which from that point has the antenna to itself. The camera list the
+     * page shows is the census taken at entry; a reboot back into setup takes
+     * a fresh one. Wi-Fi here is only ever used to edit settings and reboot. */
     {
         camlink_cfg_t c;
         camlink_cfg_get(&c);
@@ -441,6 +595,12 @@ static void config_mode(void)
         esp_err_t e = cam_scan_start();
         if (e != ESP_OK) {
             ESP_LOGE(TAG, "camera scan failed to start: %s", esp_err_to_name(e));
+        } else {
+            /* Long enough to hear a camera on the desk several times over;
+             * short enough that the page is up within a few seconds of the
+             * button. */
+            vTaskDelay(pdMS_TO_TICKS(2500));
+            cam_scan_stop();
         }
     }
 
@@ -457,6 +617,8 @@ static void config_mode(void)
     xTaskCreate(config_osd_task, "cfgosd", 3072, NULL, 3, NULL);
 
     ESP_LOGW(TAG, "join Wi-Fi \"%s\", then open http://192.168.4.1/", webcfg_ssid());
+
+    usbcli_start(true);
 }
 
 /* --------------------------------------------------------------------------
@@ -525,6 +687,47 @@ void app_main(void)
         config_mode();
         return;
     }
+    if (webcfg_bind_flag_take()) {
+        bind_mode();
+        return;
+    }
+    if (webcfg_usbcfg_flag_take()) {
+        usbcfg_mode();
+        return;
+    }
+
+    /* Plugged into a computer? Then this is a setup session, not a flight.
+     *
+     * The one thing that tells a computer apart from the flight controller's
+     * 5 V pad or a dumb charger is that a computer's USB host sends a
+     * start-of-frame packet every millisecond; nothing else does. The driver's
+     * connection monitor watches for those, so once it has settled we can ask.
+     * If a host is there, boot straight into the browser-UI mode -- no console
+     * command, no button, no Wi-Fi. Unplug and wire to the aircraft and the
+     * same firmware boots normally.
+     *
+     * Skipped for an image still on OTA probation: a fresh update has to reach
+     * normal operation to be kept, and must not be diverted into setup by a
+     * cable that happens to be attached while it is being tested. */
+    if (webcfg_bootnormal_flag_take()) {
+        ESP_LOGW(TAG, "one-shot NORMAL override -- skipping USB auto-detect this boot");
+    } else {
+        const esp_partition_t *run = esp_ota_get_running_partition();
+        esp_ota_img_states_t ost = ESP_OTA_IMG_UNDEFINED;
+        bool on_probation = run && esp_ota_get_state_partition(run, &ost) == ESP_OK
+                            && ost == ESP_OTA_IMG_PENDING_VERIFY;
+        if (!on_probation) {
+            /* Let the SOF monitor settle before trusting it: it starts by
+             * assuming a host is present and only confirms otherwise after a
+             * few missed frames. */
+            vTaskDelay(pdMS_TO_TICKS(700));
+            if (usb_serial_jtag_is_connected()) {
+                ESP_LOGW(TAG, "USB host detected -- entering browser-UI mode");
+                usbcfg_mode();
+                return;
+            }
+        }
+    }
 
 
 
@@ -575,6 +778,8 @@ void app_main(void)
     /* Deliberately last, and deliberately NOT in config mode: a new image has
      * to reach full normal operation before it is allowed to keep itself. */
     ota_probation_start();
+
+    usbcli_start(false);
 
 #if CONFIG_CAMLINK_BENCH
     bench_start();

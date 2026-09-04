@@ -12,6 +12,8 @@
 #include "esp_timer.h"
 #include <stdlib.h>
 #include "esp_gap_ble_api.h"
+#include "gopro_cam.h"
+#include "cam_scan.h"
 
 #include "ble.h"
 #include "connect_logic.h"
@@ -72,6 +74,7 @@ static uint32_t           s_last_batt_ms;
 #define NVS_KEY_MODEL "cam_model"
 #define NVS_KEY_PROTO "cam_proto"
 #define NVS_KEY_LABEL "cam_label"
+#define NVS_KEY_ATYPE "cam_atype"
 
 /* Which protocol a camera speaks, decided by its advertised model code.
  *
@@ -82,7 +85,7 @@ static uint32_t           s_last_batt_ms;
  * Unknown models default to DUML because that is the path this project proved
  * first and understands best -- and because a wrong guess there fails visibly
  * at connect rather than silently at record time. */
-typedef enum { CAM_PROTO_DUML = 0, CAM_PROTO_RSDK = 1 } cam_proto_t;
+typedef enum { CAM_PROTO_DUML = 0, CAM_PROTO_RSDK = 1, CAM_PROTO_GOPRO = 2 } cam_proto_t;
 
 /* Model code first, advertised name second.
  *
@@ -96,8 +99,16 @@ typedef enum { CAM_PROTO_DUML = 0, CAM_PROTO_RSDK = 1 } cam_proto_t;
  * model: "Osmo360-8ED9", "OsmoNano-673E", so an Action advertises
  * "OsmoAction...". That covers Action 6 and whatever follows it without
  * needing a code at all. */
-static cam_proto_t proto_for_camera(uint8_t model, const char *name)
+static const char *proto_name(cam_proto_t p)
 {
+    return p == CAM_PROTO_RSDK ? "R SDK" : p == CAM_PROTO_GOPRO ? "GoPro" : "DUML";
+}
+
+static cam_proto_t proto_for_camera(uint8_t model, const char *name, uint8_t vendor)
+{
+    /* A GoPro is a GoPro by its advert, never by a model code: it does not
+     * send one. The picker knew which it was; that decision travels here. */
+    if (vendor == CAM_VENDOR_GOPRO) return CAM_PROTO_GOPRO;
     switch (model) {
     case 0x12:   /* Osmo Action 3      */
     case 0x14:   /* Osmo Action 4      */
@@ -116,6 +127,8 @@ static cam_proto_t proto_for_camera(uint8_t model, const char *name)
 }
 
 static uint8_t     s_bound_model;
+static uint8_t     s_bound_addr[6];
+static uint8_t     s_addr_type = BLE_ADDR_TYPE_PUBLIC;
 static cam_proto_t s_proto = CAM_PROTO_DUML;
 static char        s_label[6] = "CAM";
 
@@ -166,14 +179,17 @@ static void bind_load(void)
     size_t len = sizeof(addr);
     if (nvs_get_blob(h, NVS_KEY, addr, &len) == ESP_OK && len == sizeof(addr)) {
         ble_set_bound_addr(addr);
-        uint8_t m = 0, pr = 0;
+        memcpy(s_bound_addr, addr, 6);
+        uint8_t m = 0, pr = 0, at = BLE_ADDR_TYPE_PUBLIC;
         nvs_get_u8(h, NVS_KEY_MODEL, &m);
+        nvs_get_u8(h, NVS_KEY_ATYPE, &at);
         s_bound_model = m;
+        s_addr_type   = at;
         /* The protocol was resolved when the camera was chosen, using its name
          * as well as its model code. The name is gone by now, so the decision
          * is stored rather than recomputed. */
         s_proto = (nvs_get_u8(h, NVS_KEY_PROTO, &pr) == ESP_OK)
-                      ? (cam_proto_t)pr : proto_for_camera(m, NULL);
+                      ? (cam_proto_t)pr : proto_for_camera(m, NULL, CAM_VENDOR_DJI);
         size_t ll = sizeof(s_label);
         if (nvs_get_str(h, NVS_KEY_LABEL, s_label, &ll) != ESP_OK) {
             /* Bound by a firmware that predates the label. The model code is
@@ -182,29 +198,51 @@ static void bind_load(void)
              * the next time it is picked in setup. */
             label_for_camera(m, NULL, s_label);
         }
-        ESP_LOGI(TAG, "bound camera model 0x%02X -> %s", m,
-                 s_proto == CAM_PROTO_RSDK ? "R SDK" : "DUML");
+        ESP_LOGI(TAG, "bound camera model 0x%02X -> %s", m, proto_name(s_proto));
     } else {
         ESP_LOGW(TAG, "no camera selected -- hold the button 10 s and pick one in setup");
     }
     nvs_close(h);
 }
 
-static void bind_save(const uint8_t *addr, uint8_t model, const char *name)
+static void bind_save(const uint8_t *addr, uint8_t model, const char *name,
+                      uint8_t vendor, uint8_t addr_type)
 {
-    s_proto = proto_for_camera(model, name);
+    s_proto = proto_for_camera(model, name, vendor);
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_blob(h, NVS_KEY, addr, 6);
     nvs_set_u8(h, NVS_KEY_MODEL, model);
     nvs_set_u8(h, NVS_KEY_PROTO, (uint8_t)s_proto);
-    label_for_camera(model, name, s_label);
+    nvs_set_u8(h, NVS_KEY_ATYPE, addr_type);
+    if (s_proto == CAM_PROTO_GOPRO) {
+        /* Placeholder until the camera says what it is: the session asks for
+         * hardware info on connect and derives the real label from the model
+         * name, which the advert does not carry. */
+        strlcpy(s_label, "GPRO", sizeof(s_label));
+    } else {
+        label_for_camera(model, name, s_label);
+    }
     nvs_set_str(h, NVS_KEY_LABEL, s_label);
     nvs_commit(h);
     nvs_close(h);
     s_bound_model = model;
     ESP_LOGI(TAG, "camera bound, model 0x%02X \"%s\" -> %s", model, s_label,
-             s_proto == CAM_PROTO_RSDK ? "R SDK" : "DUML");
+             proto_name(s_proto));
+}
+
+bool duml_cam_is_gopro(void)
+{
+    return s_proto == CAM_PROTO_GOPRO;
+}
+
+void duml_cam_disconnect(void)
+{
+    if (s_proto == CAM_PROTO_GOPRO) { gopro_cam_disconnect(); return; }
+    if (connect_logic_get_state() >= BLE_CONNECTED) {
+        connect_logic_ble_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
 }
 
 bool duml_cam_bound_addr(uint8_t out[6])
@@ -218,10 +256,18 @@ bool duml_cam_bound_addr(uint8_t out[6])
     return ok;
 }
 
-void duml_cam_set_binding(const uint8_t addr[6], uint8_t model, const char *name)
+/* Declared in the header since the picker landed, never defined: nothing
+ * called it until the USB console did. */
+uint8_t duml_cam_bound_model(void)
+{
+    return s_bound_model;
+}
+
+void duml_cam_set_binding(const uint8_t addr[6], uint8_t model, const char *name,
+                          uint8_t vendor, uint8_t addr_type)
 {
     if (addr == NULL) return;
-    bind_save(addr, model, name);
+    bind_save(addr, model, name, vendor, addr_type);
     ESP_LOGW(TAG, "bound by user to %02X:%02X:%02X:%02X:%02X:%02X",
              addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
 }
@@ -315,6 +361,29 @@ static void on_notify(const uint8_t *data, size_t len)
 void duml_cam_get(duml_cam_status_t *out)
 {
     if (out == NULL) return;
+    if (s_proto == CAM_PROTO_GOPRO) {
+        /* Facade over the GoPro session: same struct, so the record state
+         * machine, the OSD and the console cannot tell which camera it is. */
+        gopro_status_t g;
+        gopro_cam_get(&g);
+        memset(out, 0, sizeof(*out));
+        out->link_up       = g.link_up;
+        out->status_valid  = g.link_up && g.status_valid;
+        out->status_age_ms = g.status_age_ms;
+        out->rec_state     = (out->status_valid && g.encoding) ? DUML_REC_RECORDING : DUML_REC_IDLE;
+        out->clip_s        = (uint16_t)(g.clip_s > 0xFFFF ? 0xFFFF : g.clip_s);
+        out->left_s        = out->status_valid ? g.left_s : 0;
+        out->free_mb       = 0;
+        out->work_mode     = 1;          /* RECORD: a GoPro is always ready to */
+        out->battery_pct   = g.battery_pct;
+        out->battery_valid = out->status_valid && g.battery_valid;
+        out->hot           = g.hot;
+        out->hot_valid     = out->status_valid;
+        strlcpy(out->label, g.label[0] ? g.label : s_label, sizeof(out->label));
+        strlcpy(out->res, g.res, sizeof(out->res));
+        strlcpy(out->fps, g.fps, sizeof(out->fps));
+        return;
+    }
     if (s_lock == NULL || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) {
         memset(out, 0, sizeof(*out));
         return;
@@ -457,8 +526,17 @@ static bool rsdk_session_start(void)
 }
 
 
+void duml_cam_request_hilight(void)
+{
+    /* GoPro only. DJI's protocols have no equivalent this project speaks, so a
+     * HiLight request on a DJI camera is quietly a no-op rather than an error --
+     * the setting simply does nothing on a camera that cannot do it. */
+    if (s_proto == CAM_PROTO_GOPRO) gopro_cam_hilight();
+}
+
 void duml_cam_request_record(bool on)
 {
+    if (s_proto == CAM_PROTO_GOPRO) { gopro_cam_request_record(on); return; }
     s_req_value   = on;
     s_req_pending = true;
 }
@@ -491,6 +569,16 @@ static void cam_task(void *arg)
 {
     (void)arg;
 
+    /* The binding decides which BLE stack owner this boot gets, so it is read
+     * before either is started. A GoPro hands the radio to gopro_cam and
+     * nothing DJI ever runs; the two cannot share the controller. */
+    bind_load();
+    if (s_proto == CAM_PROTO_GOPRO) {
+        gopro_cam_start(s_bound_addr, s_addr_type);
+        vTaskDelete(NULL);
+        return;
+    }
+
     if (!is_data_layer_initialized()) {
         data_init();
     }
@@ -499,7 +587,6 @@ static void cam_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    bind_load();
 
     for (;;) {
         /* No camera chosen: connect to nothing at all.

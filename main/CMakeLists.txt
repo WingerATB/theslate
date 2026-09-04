@@ -13,5 +13,5 @@ endif()
 
 idf_component_register(SRCS "app_main.c"
                        INCLUDE_DIRS "."
-                       REQUIRES camlink msp dji_link duml ui webcfg nvs_flash bt
+                       REQUIRES camlink msp dji_link duml ui webcfg usbcli nvs_flash bt
                                 esp_driver_usb_serial_jtag ${BENCH_REQ})

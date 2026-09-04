@@ -37,9 +37,12 @@
 #define UI_CONFIG_PRESS_MS 10000
 
 typedef enum {
-    UI_BTN_SHORT,      /* released before UI_LONG_PRESS_MS   */
-    UI_BTN_LONG,       /* held past UI_LONG_PRESS_MS         */
-    UI_BTN_VERY_LONG,  /* held past UI_CONFIG_PRESS_MS       */
+    UI_BTN_SHORT,         /* released before UI_LONG_PRESS_MS                */
+    UI_BTN_LONG,          /* held past UI_LONG_PRESS_MS, still held          */
+    UI_BTN_LONG_RELEASE,  /* released between the long and very-long marks:
+                           * the bind gesture. Fires on release so the same
+                           * hold can still be carried on to setup.          */
+    UI_BTN_VERY_LONG,     /* held past UI_CONFIG_PRESS_MS                    */
 } ui_button_event_t;
 
 /* Ordered by priority: the highest-priority true condition wins the LED.
@@ -64,6 +67,8 @@ typedef enum {
  * clear enough signal that this boot is not flying anywhere. */
 typedef enum {
     UI_LED_CONFIG,       /* off: Wi-Fi config mode                          */
+    UI_LED_BINDING,      /* fast blink: looking for the nearest camera      */
+    UI_LED_WARN,         /* urgent fast blink: a camera warning is active   */
     UI_LED_RECORDING,    /* solid with a brief dip once a second            */
     UI_LED_CONNECTED,    /* solid                                           */
     UI_LED_SEARCHING,    /* slow blink                                      */

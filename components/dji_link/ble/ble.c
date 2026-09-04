@@ -315,6 +315,11 @@ void camlink_ble_set_tx_level(int lvl)
     s_tx_lvl = (esp_power_level_t)lvl;
 }
 
+int camlink_ble_get_tx_level(void)
+{
+    return (int)s_tx_lvl;
+}
+
 /* Change transmit power on a live link.
  *
  * camlink_ble_set_tx_level() only records the value for the next connection;

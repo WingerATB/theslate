@@ -129,6 +129,9 @@ uint8_t bsp_link_is_dji_camera_adv(esp_ble_gap_cb_param_t *scan_result);
 /* Override the compiled-in BLE transmit power. Takes an esp_power_level_t.
  * Call before ble_init(). Out-of-range values are ignored. */
 void camlink_ble_set_tx_level(int lvl);
+/* The level recorded by camlink_ble_set_tx_level(), for a BLE stack brought
+ * up somewhere other than ble_init() -- the GoPro session -- to apply. */
+int camlink_ble_get_tx_level(void);
 
 /* Apply a transmit level to the LIVE connection as well as to future ones.
  * set_tx_level only records the value for next time; this takes effect now. */

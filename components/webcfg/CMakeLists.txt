@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "webcfg.c" "url_decode.c"
     INCLUDE_DIRS "include" "."
-    REQUIRES esp_wifi esp_http_server esp_netif esp_event nvs_flash app_update
+    REQUIRES esp_wifi esp_coex esp_http_server esp_netif esp_event nvs_flash app_update
              camlink duml msp)
 
 # Gzip the settings page at build time rather than committing a compressed

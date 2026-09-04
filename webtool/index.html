@@ -1,0 +1,1242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>SlateFPV · USB</title>
+<style>
+/* Light, deliberately. The page is read outdoors on a phone as often as at a
+   desk, and a white ground with near-black controls stays legible in sunlight
+   where a dark theme washes out. Committed to one look rather than following
+   the viewer's theme, so what a user is told matches what they see. */
+:root{
+  --bg:#ffffff; --surface:#f6f7f9; --line:#dfe3e8; --line-2:#c9cfd6;
+  --ink:#14171c; --ink-2:#5b636e;
+  --on-ink:#ffffff;
+  --ok:#0f8a4a; --warn:#a35c00; --bad:#c2331f;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  padding:0 0 96px;-webkit-text-size-adjust:100%;-webkit-font-smoothing:antialiased}
+.wrap{max-width:560px;margin:0 auto;padding:0 16px}
+header{padding:24px 0 16px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+h1{font-size:19px;margin:0;letter-spacing:.16em;font-weight:700}
+.meta{color:var(--ink-2);font-size:12px}
+section{background:var(--bg);border:1px solid var(--line);border-radius:14px;
+  padding:16px;margin-bottom:14px}
+h2{font-size:11px;text-transform:uppercase;letter-spacing:.11em;color:var(--ink-2);
+  margin:0 0 12px;font-weight:700}
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.row+.row{margin-top:10px}
+.num{font-variant-numeric:tabular-nums}
+.note{color:var(--ink-2);font-size:13px;margin-top:10px}
+.hide{display:none}
+
+/* Segmented switch. Short labels only -- the explanation belongs under it,
+   for the one option actually chosen, not spread across all of them. */
+.seg{display:flex;background:var(--surface);border:1px solid var(--line);
+  border-radius:11px;padding:3px;gap:3px}
+.seg label{flex:1;position:relative;text-align:center;padding:9px 6px;
+  border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;
+  color:var(--ink-2);transition:background .13s,color .13s;white-space:nowrap}
+.seg input{position:absolute;opacity:0;pointer-events:none}
+.seg label:has(input:checked){background:var(--ink);color:var(--on-ink)}
+.desc{margin-top:12px;color:var(--ink-2);font-size:14px}
+.desc b{color:var(--ink);font-weight:600}
+
+button,.btn{font:inherit;font-weight:600;border-radius:11px;border:1px solid var(--line-2);
+  background:var(--bg);color:var(--ink);padding:11px 16px;cursor:pointer;
+  display:inline-block;line-height:normal}
+button.primary,.btn.primary{background:var(--ink);border-color:var(--ink);color:var(--on-ink)}
+button.ghost,.btn.ghost{background:transparent;border-color:transparent;color:var(--ink-2)}
+
+/* The file input is hidden from view but NOT from the layout, and the visible
+   control is a real <label for>. Both halves matter.
+   
+   It used to be display:none with a button that forwarded a click in
+   JavaScript. That works on a phone and is refused by Safari on a Mac, which
+   will not open a picker for an input it does not consider rendered, and will
+   not accept a synthetic click as the user gesture that authorises it. A label
+   needs no gesture forwarding: the browser opens the picker itself. */
+.vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.vh:focus-visible + .btn{outline:2px solid var(--ink);outline-offset:2px}
+button.armed{background:var(--warn);border-color:var(--warn);color:#fff}
+/* An edited-but-unsaved form looked exactly like a saved one, which is how a
+   record mode got picked, admired, and then thrown away by Done & restart. */
+button.dirty{box-shadow:0 0 0 3px #a35c0033}
+/* ---- OSD layout editor ---------------------------------------------------
+   Rows are drop targets, the tray is the palette, and both use the same tile.
+   Everything is sized in ch so a tile's width on screen is its width on the
+   OSD -- the budget is the layout, not a number beside it. */
+.orow{border:1px solid var(--line-2);border-radius:11px;padding:8px;margin-bottom:8px;
+  background:var(--bg)}
+.orow.over{border-color:var(--ink);background:#0000000a}
+.orow.bad{border-color:var(--bad)}
+.oslots{display:flex;flex-wrap:wrap;gap:6px;min-height:38px;align-items:center}
+.otile{font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  background:var(--ink);color:var(--on-ink);border-radius:8px;padding:9px 10px;
+  white-space:nowrap;touch-action:none;user-select:none;cursor:grab}
+.otile.ghosted{opacity:.35}
+.otile.drag{position:fixed;z-index:99;pointer-events:none;cursor:grabbing;
+  box-shadow:0 6px 20px #0003}
+.ohint{color:var(--ink-2);font-size:13px;padding:9px 2px}
+.obar{height:5px;border-radius:3px;background:var(--line);margin-top:8px;overflow:hidden}
+.obar i{display:block;height:100%;background:var(--ink);border-radius:3px}
+.obar.bad i{background:var(--bad)}
+.ometa{display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2);
+  margin-top:5px}
+.ometa .over{color:var(--bad);font-weight:600}
+.tray{display:flex;flex-wrap:wrap;gap:6px;min-height:38px;padding:8px;
+  border:1px dashed var(--line-2);border-radius:11px}
+.prev{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#000;
+  color:#eee;border-radius:9px;padding:10px 12px;white-space:pre;overflow-x:auto}
+button:disabled{opacity:.45;cursor:default}
+.pill{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);
+  color:var(--ink-2);white-space:nowrap}
+.pill.on{color:var(--ok);border-color:#0f8a4a44}
+.pill.off{color:var(--bad);border-color:#c2331f44}
+
+/* Live channel readout: flick the switch, watch the marker, drag the window
+   around where it lands. */
+.track{position:relative;height:38px;margin:14px 0 6px;background:var(--surface);
+  border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.window{position:absolute;top:0;bottom:0;background:#14171c14;
+  border-left:2px solid var(--ink);border-right:2px solid var(--ink)}
+.marker{position:absolute;top:0;bottom:0;width:2px;background:var(--ink-2);
+  transition:left .08s linear}
+.marker.in{background:var(--ok);box-shadow:0 0 7px #0f8a4a99}
+.ticks{display:flex;justify-content:space-between;color:var(--ink-2);font-size:11px}
+input[type=range]{width:100%;accent-color:var(--ink)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+
+.cam{display:flex;align-items:center;gap:12px;border:1px solid var(--line);
+  border-radius:11px;padding:11px 13px;margin-bottom:8px;cursor:pointer;
+  background:var(--bg);transition:border-color .13s,background .13s}
+.cam.sel{border-color:var(--ink);background:var(--surface)}
+.cam.armed{border-color:var(--warn);background:#a35c000f}
+.cam .info{flex:1;min-width:0}
+.cam .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cam .sub{color:var(--ink-2);font-size:12px;font-variant-numeric:tabular-nums}
+.bars{display:flex;align-items:flex-end;gap:2px;height:16px}
+.bars i{width:3px;background:var(--line-2);border-radius:1px}
+.bars i.on{background:var(--ink)}
+
+footer{position:fixed;left:0;right:0;bottom:0;background:#ffffffee;
+  backdrop-filter:blur(10px);border-top:1px solid var(--line);
+  padding:12px 0 calc(12px + env(safe-area-inset-bottom))}
+footer .wrap{display:flex;gap:10px}
+footer button{flex:1}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:88px;
+  background:var(--ink);color:var(--on-ink);border-radius:9px;
+  padding:9px 16px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
+#toast.show{opacity:1}
+
+/* --- USB bridge additions (host tool only) --- */
+#usbGate{position:fixed;inset:0;z-index:1000;background:rgba(20,23,28,.55);display:flex;align-items:center;justify-content:center;padding:20px}
+#usbGate .box{background:#fff;border-radius:16px;max-width:420px;width:100%;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+#usbGate h2{margin:0 0 8px;font-size:18px}
+#usbGate p{color:#5b636e;font-size:14px;line-height:1.5}
+#usbGate button{width:100%;margin-top:14px;padding:12px;border:0;border-radius:10px;background:#0f8a4a;color:#fff;font:inherit;font-weight:600;cursor:pointer}
+#usbGate button:disabled{opacity:.5}
+#usbGate .warn{background:#fdecea;border:1px solid #e74c3c;color:#c0392b;padding:8px 10px;border-radius:8px;font-size:13px;margin-top:10px}
+#usbConn{position:fixed;top:8px;right:10px;z-index:900;font-size:12px;color:#0f8a4a;background:#fff;border:1px solid #e3e6ea;border-radius:20px;padding:3px 10px;display:none}
+</style>
+</head>
+<body>
+
+<div id="usbGate"><div class="box">
+  <h2>Connect to SlateFPV</h2>
+  <p>Plug the module into this computer with a USB-C cable, then connect. It enters setup by itself. Chrome or Edge only.</p>
+  <div class="warn" id="usbNoSerial" style="display:none">This browser has no Web Serial. Use Chrome or Edge, over https or localhost.</div>
+  <button id="usbConnect">Connect over USB</button>
+  <p style="text-align:center;color:#8a929c;font-size:11px;margin:10px 0 0">build 1.1.0-17</p>
+  <button id="flashToggle" style="width:100%;margin-top:10px;padding:11px;border:1px solid #e3e6ea;border-radius:10px;background:#fff;color:#14171c;font:inherit;font-weight:600;cursor:pointer">Flash / re-flash firmware</button>
+  <div id="flashPanel" style="display:none;margin-top:12px;border-top:1px solid #eee;padding-top:12px">
+    <p style="color:#5b636e;font-size:13px;margin:0 0 10px">Installs SlateFPV onto the board over USB — works on a brand-new board too. A full install resets saved settings; just reconfigure after. Chrome or Edge.</p>
+    <button id="flashUpdate" style="width:100%;padding:11px;border:0;border-radius:10px;background:#0f8a4a;color:#fff;font:inherit;font-weight:600;cursor:pointer">Update firmware — keeps your settings</button>
+    <button id="flashFull" style="width:100%;margin-top:8px;padding:10px;border:1px solid #e3e6ea;border-radius:10px;background:#fff;color:#14171c;font:inherit;font-weight:600;cursor:pointer">Full install — resets settings (blank board)</button>
+    <label style="display:block;margin-top:10px;font-size:13px;color:#5b636e">or choose a .bin file (full image at 0x0): <input type="file" id="flashFile" accept=".bin" style="display:block;margin-top:6px"></label>
+    <div id="flashBarWrap" style="display:none;height:8px;background:#eef;border-radius:4px;margin-top:12px;overflow:hidden"><div id="flashBar" style="height:100%;width:0;background:#0f8a4a;transition:width .1s"></div></div>
+    <div id="flashLog" style="white-space:pre-wrap;font:12px ui-monospace,monospace;color:#5b636e;max-height:140px;overflow:auto;margin-top:8px"></div>
+  </div>
+</div></div>
+<div id="usbConn"><span id="usbConnTxt">SlateFPV 1.1.0-17</span> <button id="usbDisc" style="margin-left:6px;border:0;background:#c0392b;color:#fff;border-radius:12px;padding:2px 9px;font:inherit;font-size:12px;cursor:pointer">Disconnect</button></div>
+<div id="usbNoData" style="display:none;position:fixed;top:44px;left:50%;transform:translateX(-50%);z-index:901;background:#fdecea;border:1px solid #e74c3c;color:#c0392b;padding:8px 14px;border-radius:8px;font-size:13px">Connected, but no data yet from the module. Click Disconnect, then Connect again.</div>
+<script>
+/* Web Serial transport. The page is the unmodified Wi-Fi settings page; the
+   only change is that fetch('/api/...') is routed over the USB serial link
+   instead of HTTP, so the exact same UI drives the module over the cable. */
+(function(){
+  class Board{
+    constructor(){this.n=0;this.pending={};this.buf='';this.enc=new TextEncoder();}
+    get connected(){return !!this.port;}
+    async _open(){
+      await this.port.open({baudRate:115200});
+      this.writer=this.port.writable.getWriter();
+      this.buf='';this._read();
+    }
+    async connect(){
+      this.port=await navigator.serial.requestPort();
+      await this._open();
+    }
+    async reopen(){
+      for(let i=0;i<30;i++){
+        await new Promise(r=>setTimeout(r,500));
+        try{const ps=await navigator.serial.getPorts();if(ps.length){this.port=ps[0];await this._open();return true;}}catch(e){}
+      }
+      return false;
+    }
+    async disconnect(){
+      try{this.reader&&await this.reader.cancel();}catch(e){}
+      try{this.writer&&this.writer.releaseLock();}catch(e){}
+      try{this.port&&await this.port.close();}catch(e){}
+      this.port=null;
+    }
+    async _read(){
+      const dec=new TextDecoder();this.reader=this.port.readable.getReader();
+      try{for(;;){const{value,done}=await this.reader.read();if(done)break;
+        this.buf+=dec.decode(value,{stream:true});let i;
+        while((i=this.buf.indexOf('\n'))>=0){const line=this.buf.slice(0,i).replace(/\r$/,'');this.buf=this.buf.slice(i+1);this._line(line);}}}catch(e){}
+      this.port=null;const c=document.getElementById('usbConn');if(c)c.style.display='none';
+    }
+    _line(line){
+      if(line.startsWith('@api ')){
+        const m=line.match(/^@api (\S+) (ok|err) ?([\s\S]*)$/);
+        if(m){const p=this.pending[m[1]];if(p){delete this.pending[m[1]];
+          if(m[2]==='ok')p.res(m[3]||'{}');else p.rej(new Error(m[3]||'error'));}}
+      }
+    }
+    api(verb,rest){
+      const id=String(++this.n);
+      const line='api '+id+' '+verb+(rest?' '+rest:'')+'\n';
+      return new Promise((res,rej)=>{this.pending[id]={res,rej};
+        this.writer.write(this.enc.encode(line));
+        setTimeout(()=>{if(this.pending[id]){delete this.pending[id];rej(new Error('timeout'));}},4000);});
+    }
+  }
+  const board=new Board();window._board=board;
+
+  const real=window.fetch.bind(window);
+  function resp(ok,text){return{ok:ok,status:ok?200:400,json:async()=>JSON.parse(text||'{}'),text:async()=>text};}
+  window.fetch=async(url,opts)=>{
+    opts=opts||{};
+    if(typeof url==='string' && url.indexOf('/api/')===0){
+      if(!board.connected) throw new Error('not connected');
+      const ep=url.split('?')[0].slice(5);
+      const body=opts.body?opts.body.toString():'';
+      const map={state:'state',scan:'scan',config:'config',osd:'osd',bind:'bind',forget:'forget',repair:'repair',exit:'exit'};
+      if(ep==='update') return resp(false,'firmware update is not available over USB — use esptool');
+      const verb=map[ep];
+      if(!verb) throw new Error('unknown endpoint '+ep);
+      try{const txt=await board.api(verb, (ep==='config'||ep==='osd'||ep==='bind')?body:'');return resp(true,txt);}
+      catch(e){return resp(false,e.message||'error');}
+    }
+    return real(url,opts);
+  };
+
+  function boot(){
+    const gate=document.getElementById('usbGate');
+    const btn=document.getElementById('usbConnect');
+    if(!('serial'in navigator)){document.getElementById('usbNoSerial').style.display='';btn.disabled=true;}
+    async function ensureUsbcfg(){
+      let m=null;
+      try{m=JSON.parse(await board.api('mode'));}catch(e){return true;} /* old firmware: no mode verb, assume ready */
+      if(m.usbcfg)return true;
+      btn.textContent='Entering setup…';
+      try{await board.api('usbcfg');}catch(e){}   /* reboots; the reply may be cut off */
+      return await board.reopen();
+    }
+    btn.onclick=async()=>{
+      btn.disabled=true;btn.textContent='Connecting…';
+      try{
+        await board.connect();
+        if(!await ensureUsbcfg()) throw new Error('module did not come back in setup mode');
+        gate.style.display='none';document.getElementById('usbConn').style.display='';
+      }catch(e){btn.disabled=false;btn.textContent='Connect over USB';alert('Connect failed: '+e.message);}
+    };
+    const doneBtn=document.getElementById('done');
+    if(doneBtn){
+      doneBtn.textContent='Test mode (normal boot)';
+      doneBtn.title='Reboot the board into normal flight mode so the OSD and camera run over USB';
+      doneBtn.onclick=async()=>{
+        if(!confirm('Reboot the board into normal flight mode for one boot?\n\nThe camera link and the OSD will run, drawn to your flight controller, so you can watch warnings in the goggles. This works over USB (which powers your FC). Reconnect here afterwards to return to setup.')) return;
+        try{await board.api('normal');}catch(e){}
+        try{await board.disconnect();}catch(e){}
+        alert('Board is rebooting into normal mode. Watch your OSD / goggles.\n\nReload this page and Connect to return to setup.');
+        window.location.reload();
+      };
+    }
+    // Keep the connection badge honest even if a reconnect left it out of sync.
+    setInterval(()=>{const c=document.getElementById('usbConn');if(c)c.style.display=(window._board&&window._board.connected)?'':'none';},800);
+    document.getElementById('usbDisc').onclick=async()=>{
+      await board.disconnect();
+      document.getElementById('usbConn').style.display='none';
+      document.getElementById('usbNoData').style.display='none';
+      gate.style.display='';btn.disabled=false;btn.textContent='Connect over USB';
+      window.location.reload();   /* clean slate for the next connect */
+    };
+    // Data watchdog: if nothing arrives shortly after connecting, say so.
+    let sawData=false;
+    const of=window.fetch;
+    window.fetch=async(u,o)=>{const r=await of(u,o);if(typeof u==='string'&&u.indexOf('/api/state')===0&&r.ok){sawData=true;document.getElementById('usbNoData').style.display='none';}return r;};
+    setTimeout(()=>{if(board.connected&&!sawData)document.getElementById('usbNoData').style.display='';},4000);
+    // Firmware-over-USB is not supported by this tool; hide that card. It must
+    // stay in the DOM: fill() writes to #fwVer inside it, and removing it made
+    // fill() throw before it populated anything else.
+    const fw=[...document.querySelectorAll('section')].find(s=>{const h=s.querySelector('h2');return h&&h.textContent.trim()==='Firmware';});
+    if(fw)fw.style.display='none';
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot);else boot();
+})();
+</script>
+
+<div class="wrap">
+
+<header>
+  <h1>SlateFPV</h1>
+  <span class="meta" id="meta"></span>
+</header>
+
+<section>
+  <h2>Camera</h2>
+  <div id="camList"><div class="note" id="camEmpty">Looking for cameras…</div></div>
+  <div class="row" style="margin-top:12px">
+    <span class="meta" id="camBound">No camera selected</span>
+    <button class="ghost" id="forget">Forget</button>
+  </div>
+  <div class="note">Switch your camera on and it appears here. Pick yours — the
+    module connects to that one and nothing else.</div>
+
+  <div id="linkFault" class="hide" style="margin-top:14px;border:1px solid var(--warn);
+    border-radius:11px;padding:14px 16px">
+    <div style="font-weight:600;margin-bottom:6px">Camera link</div>
+    <div class="note" id="faultText" style="margin-top:0"></div>
+    <div class="note" id="faultHint" style="margin-top:8px"></div>
+    <button class="ghost" id="repair" style="margin-top:10px;padding-left:0">Forget pairing keys</button>
+  </div>
+</section>
+
+<section>
+  <h2>Recording</h2>
+  <div class="seg">
+    <label><input type="radio" name="mode" value="0">Arm</label>
+    <label><input type="radio" name="mode" value="1">Switch</label>
+    <label><input type="radio" name="mode" value="2">Cut</label>
+    <label><input type="radio" name="mode" value="3">Both</label>
+  </div>
+  <div class="desc" id="modeDesc"></div>
+
+  <div style="margin-top:16px">
+    <div class="row"><label for="stopdelay">Keep recording after stop</label>
+      <span class="num" id="stopdelayV"></span></div>
+    <input type="range" id="stopdelay" min="0" max="30" step="1">
+    <div class="note">Crash insurance: after the automatic stop (disarm, or the
+      switch off), keep recording this many seconds so a crash on landing is not
+      cut off. Re-arming during the countdown cancels it.</div>
+  </div>
+
+  <div id="chanCard" style="margin-top:18px">
+    <div class="row" style="margin-bottom:10px">
+      <label style="font-weight:600">Control type</label>
+    </div>
+    <div class="seg">
+      <label><input type="radio" name="kind" value="0">Switch</label>
+      <label><input type="radio" name="kind" value="1">Button</label>
+    </div>
+    <div class="desc" id="kindDesc"></div>
+
+    <div class="row" style="margin-top:18px">
+      <label for="aux" style="font-weight:600">Channel</label>
+      <select id="aux" style="background:var(--bg);color:var(--ink);
+        border:1px solid var(--line-2);border-radius:9px;padding:9px 10px;
+        font-size:15px;min-width:110px"></select>
+    </div>
+
+    <div id="windowCard">
+    <div class="track">
+      <div class="window" id="window"></div>
+      <div class="marker" id="marker" style="left:50%"></div>
+    </div>
+    <div class="ticks"><span>900</span><span class="num" id="live">no link</span><span>2100</span></div>
+
+    <div class="two" style="margin-top:14px">
+      <div>
+        <div class="row"><label for="min">Records above</label><span class="num" id="minV"></span></div>
+        <input type="range" id="min" min="900" max="2100" step="5">
+      </div>
+      <div>
+        <div class="row"><label for="max">…and below</label><span class="num" id="maxV"></span></div>
+        <input type="range" id="max" min="900" max="2100" step="5">
+      </div>
+    </div>
+    <div class="note">Move the switch and watch the marker. Recording runs while
+      it sits inside the shaded window.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Radio power</h2>
+  <div class="seg">
+    <label><input type="radio" name="tx" value="0">Low</label>
+    <label><input type="radio" name="tx" value="1">Medium</label>
+    <label><input type="radio" name="tx" value="2">High</label>
+    <label><input type="radio" name="tx" value="3">Max</label>
+  </div>
+  <div class="desc" id="txDesc"></div>
+  <div class="note" id="txWarn"></div>
+
+  <label class="row" style="margin-top:16px;cursor:pointer">
+    <span style="font-weight:600">Turn it down while flying</span>
+    <input type="checkbox" id="txauto" style="width:20px;height:20px;accent-color:var(--ink)">
+  </label>
+  <div class="note">Uses the power above while you are disarmed, and drops to
+    <b>Low</b> for as long as the quad is armed. Setting up wants reach — the
+    camera may be across the room. Flying does not: it is centimetres from the
+    camera and millimetres from your receiver, where being loud buys nothing and
+    costs the link that matters. With this on you can leave the setting above on
+    High without carrying it into the air.</div>
+</section>
+
+<section>
+  <h2>Setup switch</h2>
+  <div class="row">
+    <label for="cfgaux" style="font-weight:600">Channel</label>
+    <select id="cfgaux" style="background:var(--bg);color:var(--ink);
+      border:1px solid var(--line-2);border-radius:9px;padding:9px 10px;
+      font-size:15px;min-width:110px"></select>
+  </div>
+  <div class="note">Opens this page from your transmitter, for when the module
+    is buried in the frame and you cannot reach its button.</div>
+
+  <div id="cfgCard" class="hide">
+    <div class="row" style="margin-top:16px;margin-bottom:10px">
+      <label style="font-weight:600">Control type</label>
+    </div>
+    <div class="seg">
+      <label><input type="radio" name="cfgkind" value="0">Switch</label>
+      <label><input type="radio" name="cfgkind" value="1">Button</label>
+    </div>
+    <div class="desc" id="cfgKindDesc"></div>
+
+    <div id="cfgHoldCard" style="margin-top:16px">
+      <div class="row"><label for="cfghold">Hold for</label>
+        <span class="num" id="cfgHoldV"></span></div>
+      <input type="range" id="cfghold" min="0" max="100" step="5">
+      <div class="note">How long the switch must be held before the OSD says
+        <code>READY</code>. Zero is ready the instant the channel crosses — you
+        still commit by dropping the switch.</div>
+    </div>
+
+    <div class="note" style="margin-top:14px">The switch only ever <b>opens</b>
+      setup. You leave it with <b>Done &amp; restart</b> at the bottom of this
+      page, or by <b>arming</b> — nothing else on the aircraft will drop you out
+      of the page while you are using it.
+      <br><br>Setup is refused while armed, and arming leaves it, because a
+      module in setup has no camera link at all: an aircraft that took off in it
+      would record nothing and say nothing about why.</div>
+  </div>
+</section>
+
+<section>
+  <h2>GoPro</h2>
+  <div class="row">
+    <label for="hilight" style="font-weight:600">HiLight channel</label>
+    <select id="hilight" style="background:var(--bg);color:var(--ink);
+      border:1px solid var(--line-2);border-radius:9px;padding:9px 10px;
+      font-size:15px;min-width:110px"></select>
+  </div>
+  <div class="note">A flick of this channel tags a HiLight moment on a GoPro, so
+    you can jump straight to it in the footage. Off, or any AUX channel.</div>
+</section>
+
+<section>
+  <h2>Flight controller</h2>
+  <div class="row"><span>MSP link</span><span class="pill" id="fcPill">—</span></div>
+  <div class="row"><span>Armed</span><span class="pill" id="armPill">—</span></div>
+  <div class="note">Setup does not need the flight controller. Power it up if
+    you want to see your switch move above.</div>
+</section>
+
+<section>
+  <h2>OSD layout</h2>
+  <div class="note">Drag a field into a row. Each row is one of Betaflight's
+    four custom messages, and holds <b>16 characters</b> — the bar shows how
+    much of that a row has spent. Widths are worst cases: a battery reading
+    books room for <code>100%</code> even while it says <code>87%</code>,
+    because the row cannot resize once you are flying.</div>
+
+  <div id="rows"></div>
+
+  <div class="row" style="margin-top:16px"><span style="font-weight:600">Fields</span>
+    <span class="meta">drag out to add · drag back to remove</span></div>
+  <div id="tray" class="tray"></div>
+
+  <div class="row" style="margin-top:14px"><span style="font-weight:600">Preview</span>
+    <span class="meta">worst case</span></div>
+  <div id="osdPrev" class="prev"></div>
+
+  <div class="two" style="margin-top:14px">
+    <button class="ghost" id="osdReset">Reset to default</button>
+    <button class="primary" id="osdSave">Save layout</button>
+  </div>
+</section>
+
+<section>
+  <h2>Firmware</h2>
+  <div class="row"><span>Installed</span><span class="meta num" id="fwVer">—</span></div>
+  <!-- No accept filter. iOS maps the attribute to a UTI, and ".bin" has no
+       clean mapping, so a phone's Files browser can grey out the very file the
+       user is trying to pick. The firmware validates the image anyway, and a
+       clear rejection beats an unselectable file. -->
+  <input type="file" id="fwFile" class="vh">
+  <div class="row" style="margin-top:12px">
+    <span class="meta" id="fwName">No file chosen</span>
+    <label class="btn ghost" for="fwFile">Choose file…</label>
+  </div>
+  <div class="track" id="fwTrack" style="display:none">
+    <div class="window" id="fwBar" style="left:0;width:0"></div>
+  </div>
+  <button id="fwGo" style="width:100%;margin-top:10px" disabled>Install</button>
+  <div class="note" id="fwNote">Pick the <b>update</b> file
+    (<code>-update.bin</code>), not the full-flash one. After installing,
+    <b>keep the module powered for 30 seconds</b> — a new version has to prove
+    it runs before it is kept.</div>
+</section>
+
+</div>
+
+<footer><div class="wrap">
+  <button class="primary" id="save">Save</button>
+  <button id="done">Done &amp; restart</button>
+</div></footer>
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const AUX_MAX = 14;
+let pollTimer = null;
+// Redraws are suppressed until this moment, so a poll cannot replace a row
+// under a finger that is reaching for it.
+//
+// This was a counter -- incremented on pointerdown, decremented on pointerup --
+// and it leaked. A touch that turns into a scroll fires pointerdown and then
+// pointercancel, never pointerup, so one scroll left the counter stuck above
+// zero and polling stopped for the rest of the session. The page then froze:
+// selecting a camera appeared to do nothing, because nothing was redrawing it.
+//
+// A deadline cannot leak. The worst case is that redraws resume a couple of
+// seconds after the last touch, which is self-correcting by construction rather
+// than by remembering to pair every event.
+let holdUntil = 0;
+const holdRedraw = ms => { holdUntil = Date.now() + ms; };
+const redrawAllowed = () => Date.now() >= holdUntil;
+let loaded  = false;
+let dirty   = false;          // form edited since the last successful save
+
+// Save is a separate button from Done & restart, so a form can be edited,
+// admired, and then discarded by a restart without a single thing on screen
+// having said so. Everything below exists to make that impossible: the button
+// says there is something to save, and the restart says what it would cost.
+function setDirty(v) {
+  dirty = v;
+  $('#save').textContent = v ? 'Save changes' : 'Save';
+  $('#save').classList.toggle('dirty', v);
+}
+
+for (let i = 1; i <= AUX_MAX; i++) {
+  const o = document.createElement('option');
+  o.value = i; o.textContent = 'AUX ' + i;
+  $('#aux').appendChild(o);
+}
+{
+  for (const sel of ['#cfgaux', '#hilight']) {
+    const off = document.createElement('option');
+    off.value = 0; off.textContent = 'Off';
+    $(sel).appendChild(off);
+    for (let i = 1; i <= AUX_MAX; i++) {
+      const o = document.createElement('option');
+      o.value = i; o.textContent = 'AUX ' + i;
+      $(sel).appendChild(o);
+    }
+  }
+}
+
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 1800);
+}
+
+// 900-2100, the same span Betaflight's Modes tab uses -- and the same span the
+// receiver actually produces. A CRSF or SBUS channel at +100% lands on 2012 us,
+// so a track that stopped at 2000 pinned the marker to the end and reported the
+// switch as outside the window it was visibly sitting at the top of.
+const US_LO = 900, US_HI = 2100;
+const pct = us => Math.max(0, Math.min(100, (us - US_LO) * 100 / (US_HI - US_LO)));
+
+// One description at a time, under the switch, for the option actually
+// chosen. Showing all of them at once is how the old layout worked and it made
+// the page a wall of text the user had to read before they could choose.
+const MODE_DESC = {
+  '0': '<b>Recording follows arming.</b> Arm the quad and the camera rolls; ' +
+       'disarm and it stops. Nothing else to set up.',
+  '1': '<b>A switch on your radio starts and stops recording.</b> Arming does ' +
+       'nothing on its own — you decide when the camera rolls.',
+  '2': '<b>Arming records, and the switch cuts a take.</b> Flick it mid-flight ' +
+       'to end the current clip and immediately start a fresh one. It never ' +
+       'stops recording — it only breaks the footage into separate files.',
+  '3': '<b>Arming records, and the switch works on its own as well.</b> Arm and ' +
+       'the camera rolls; flick the switch mid-flight to stop recording, flick ' +
+       'it again to start. Arming or disarming takes control back, so you ' +
+       'always land on a stopped camera.',
+};
+
+const KIND_DESC = {
+  '0': '<b>A switch that holds its position.</b> Recording runs while the ' +
+       'channel sits inside the window below. Survives a brownout: the switch ' +
+       'still says where it is, so the module works out the rest.',
+  '1': '<b>A button you press and release.</b> Each press flips recording on ' +
+       'or off, and the window below is ignored — a button leaves the channel ' +
+       'wherever the press put it, so there is no position to test. The ' +
+       'trade-off is that after a power cut the module cannot know which way ' +
+       'you left it.',
+};
+
+const CFG_KIND_DESC = {
+  '0': '<b>A switch, in two parts, with the OSD counting you through it.</b> ' +
+       'Flick it up and the OSD says <code>ENTER</code>; after the hold time ' +
+       'it says <code>READY</code>; drop the switch and it says ' +
+       '<code>CONFIG</code> and setup opens. Let go before <code>READY</code> ' +
+       'and nothing happens — the OSD goes straight back to what it was ' +
+       'saying. Committing on the way <i>down</i> also means the switch is ' +
+       'already off when setup starts, so leaving it cannot walk straight ' +
+       'back in.',
+  '1': '<b>A button — this acts instantly.</b> Any movement of the channel ' +
+       'says <code>CONFIG</code> and opens setup at once, with no hold and no ' +
+       'release to wait for. Quicker, and correspondingly easier to trigger ' +
+       'by accident: there is nothing between the press and the reboot but ' +
+       'the check that you are disarmed.',
+};
+
+const TX_DESC = {
+  '0': '<b>−24 dBm.</b> Correct once the camera is mounted on the quad, ' +
+       'centimetres away. Quietest next to your receiver.',
+  '1': '<b>−12 dBm.</b> Camera on the same desk.',
+  '2': '<b>0 dBm.</b> Camera across the room.',
+  '3': '<b>+3 dBm.</b> Maximum reach, for bench work only.',
+};
+
+// Mirrors camlink_cfg_in_window() in camlink_cfg.h. A limit dragged to the end
+// of its travel means "and beyond": a receiver at +100% is not obliged to stop
+// on the number the slider stops on, and the marker must agree with the module
+// about whether the switch counts.
+function inWindow(us) {
+  const lo = +$('#min').value, hi = +$('#max').value;
+  return (lo <= US_LO || us >= lo) && (hi >= US_HI || us <= hi);
+}
+
+function paint() {
+  const lo = +$('#min').value, hi = +$('#max').value;
+  $('#minV').textContent = lo;
+  $('#maxV').textContent = hi;
+  $('#window').style.left  = pct(lo) + '%';
+  $('#window').style.width = (pct(hi) - pct(lo)) + '%';
+
+  const mode = $('input[name=mode]:checked')?.value;
+  $('#modeDesc').innerHTML = MODE_DESC[mode] || '';
+
+  const kind = $('input[name=kind]:checked')?.value;
+  $('#kindDesc').innerHTML = KIND_DESC[kind] || '';
+  // A button ignores the window, so showing a window to tune is a lie.
+  $('#windowCard').classList.toggle('hide', kind === '1');
+  // Arm mode watches arm state and nothing else, so the channel settings are
+  // not merely irrelevant — showing them would imply they still apply.
+  $('#chanCard').classList.toggle('hide', mode === '0');
+
+  const cfgAux  = +$('#cfgaux').value;
+  const cfgKind = $('input[name=cfgkind]:checked')?.value;
+  $('#cfgCard').classList.toggle('hide', !cfgAux);
+  $('#cfgKindDesc').innerHTML = CFG_KIND_DESC[cfgKind] || '';
+  // A button has no position to hold, so a hold time would be a control that
+  // does nothing.
+  $('#cfgHoldCard').classList.toggle('hide', cfgKind === '1');
+  const hd = +$('#cfghold').value;
+  $('#cfgHoldV').textContent = hd === 0 ? 'instantly' : (hd / 10).toFixed(1) + ' s';
+  const sd = +$('#stopdelay').value;
+  $('#stopdelayV').textContent = sd === 0 ? 'off' : sd + ' s';
+
+  const tx = $('input[name=tx]:checked')?.value;
+  $('#txDesc').innerHTML = TX_DESC[tx] || '';
+  $('#txWarn').textContent = (!$('#txauto').checked && (tx === '3' || tx === '2'))
+    ? 'Set this back to Low before flying, or switch on the option below.' : '';
+}
+
+// The two ends of the window must not cross. A min above max is a range that can
+// never match, which silently means "never record" -- a setting that looks saved
+// and does nothing is worse than one that refuses to be set.
+// Keep the two ends inside 900..2100 AND strictly apart, even at the extremes.
+// The old version pushed the other handle past 2100; the range input clamped it
+// back to 2100, leaving min == max -- a window that means "never record" and
+// that the firmware rightly refuses as out of range.
+const US_MIN = 900, US_MAX = 2100, US_GAP = 5;
+$('#min').addEventListener('input', () => {
+  let lo = +$('#min').value, hi = +$('#max').value;
+  if (lo > US_MAX - US_GAP) { lo = US_MAX - US_GAP; $('#min').value = lo; }
+  if (hi <= lo) { hi = lo + US_GAP; $('#max').value = hi; }
+  paint();
+});
+$('#max').addEventListener('input', () => {
+  let lo = +$('#min').value, hi = +$('#max').value;
+  if (hi < US_MIN + US_GAP) { hi = US_MIN + US_GAP; $('#max').value = hi; }
+  if (lo >= hi) { lo = hi - US_GAP; $('#min').value = lo; }
+  paint();
+});
+document.addEventListener('input', paint);
+
+// Only the five controls that are actually persisted. The file picker and the
+// camera list are not settings and must not light the Save button up.
+document.addEventListener('change', e => {
+  if (!loaded) return;
+  const t = e.target;
+  if (t.name === 'mode' || t.name === 'tx' || t.name === 'kind' ||
+      t.id === 'aux' || t.id === 'min' || t.id === 'max' ||
+      t.id === 'txauto' || t.id === 'cfgaux' || t.id === 'cfghold' ||
+      t.id === 'hilight' || t.id === 'stopdelay' || t.name === 'cfgkind') setDirty(true);
+});
+['min', 'max', 'cfghold', 'stopdelay'].forEach(id =>
+  $('#' + id).addEventListener('input', () => { if (loaded) setDirty(true); }));
+document.addEventListener('pointerdown',   () => holdRedraw(2000));
+document.addEventListener('pointerup',     () => holdRedraw(400));
+document.addEventListener('pointercancel', () => holdRedraw(400));
+document.addEventListener('pointermove',   e => {
+  // Keep the hold alive during a drag, but only while a pointer is actually
+  // down -- a mouse moving across the page must not stop the list updating.
+  if (e.buttons || e.pointerType === 'touch') holdRedraw(2000);
+});
+
+function fill(s) {
+  s.fields.forEach(f => CAT[f.id] = f);
+  CAT[0] = {id: 0, name: '', ex: '', w: 0};
+  OSDMAX = s.osdmax;
+  layout = s.osd.map(r => r.filter(id => id !== 0));
+  drawOsd();
+  setOsdDirty(false);
+
+  $('#meta').textContent = s.ssid + ' · ' + s.fw;
+  $('#fwVer').textContent = s.fw;
+  document.querySelector(`input[name=mode][value="${s.cfg.mode}"]`).checked = true;
+  document.querySelector(`input[name=tx][value="${s.cfg.tx}"]`).checked = true;
+  document.querySelector(`input[name=kind][value="${s.cfg.kind}"]`).checked = true;
+  $('#txauto').checked = !!s.cfg.txauto;
+  $('#cfgaux').value = s.cfg.cfgaux || 0;
+  $('#hilight').value = s.cfg.hilight || 0;
+  $('#stopdelay').value = (s.cfg.stopdelay != null ? s.cfg.stopdelay : 5);
+  document.querySelector(`input[name=cfgkind][value="${s.cfg.cfgkind}"]`).checked = true;
+  $('#cfghold').value = s.cfg.cfghold;
+  $('#aux').value = Math.min(Math.max(s.cfg.aux, 1), AUX_MAX);
+  $('#min').value = s.cfg.min;
+  $('#max').value = s.cfg.max;
+  paint();
+}
+
+function live(s) {
+  $('#camBound').textContent = s.cam.bound ? 'Selected: ' + s.cam.mac
+                                           : 'No camera selected';
+  $('#forget').disabled      = !s.cam.bound;
+
+  // Why the link is down, in the words of someone holding a quad. Shown only
+  // when there is something to say: a module that has never had a failure
+  // should not display a fault box explaining that nothing is wrong.
+  const f = $('#linkFault');
+  if (s.cam.bound && s.cam.fault && s.cam.fails > 0) {
+    f.classList.remove('hide');
+    $('#faultText').innerHTML =
+      '<b>' + s.cam.fault + '</b><br>' + s.cam.fails +
+      (s.cam.fails === 1 ? ' failed attempt' : ' failed attempts') +
+      (s.cam.everup ? ', after connecting successfully earlier.'
+                    : ', and it has not connected once since power-up.');
+    // The camera list above is the other half of the answer, so say which half
+    // to read: present-but-weak and absent-entirely need different fixes.
+    const seen = (window._lastCams || []).find(c => c.bound);
+    $('#faultHint').textContent = seen
+      ? (seen.rssi > -80
+          // Strong signal and it still refuses. Signal is not the problem, and
+          // saying "move it closer" here sends people to rearrange their quad
+          // for nothing. A camera that advertises but will not complete a
+          // connection is almost always already talking to something else.
+          ? 'Your camera is listed above at ' + seen.rssi + ' dBm, so it is on the ' +
+            'air and close enough. A camera that is heard clearly but still refuses ' +
+            'to connect is usually busy with something else: close DJI Mimo, turn ' +
+            'off Bluetooth on your phone, then switch the camera off and on again. ' +
+            'Note that a camera that is asleep still appears in this list.'
+          : 'Your camera is listed above at ' + seen.rssi + ' dBm, which is weak. ' +
+            'Move it closer or raise Radio power, and check it is actually switched ' +
+            'on — a camera that is off or asleep still appears here.')
+      : 'Your camera is not in the list above, so nothing is hearing it. Check it is ' +
+        'switched on, charged, and not already connected to a phone.';
+  } else {
+    f.classList.add('hide');
+  }
+
+  const fp = $('#fcPill'), ap = $('#armPill');
+  fp.textContent = s.fc.link ? 'connected' : 'no link';
+  fp.className = 'pill ' + (s.fc.link ? 'on' : 'off');
+  ap.textContent = s.fc.link ? (s.fc.armed ? 'ARMED' : 'disarmed') : '—';
+  ap.className = 'pill ' + (s.fc.link && s.fc.armed ? 'off' : '');
+
+  const idx = +$('#aux').value + 3;
+  const raw = (s.fc.link && s.fc.rc) ? s.fc.rc[idx] : undefined;
+  const us  = Number.isFinite(raw) ? raw : null;
+  const m = $('#marker');
+  if (us === null) {
+    $('#live').textContent = s.fc.link ? 'channel not sent' : 'no link';
+    m.classList.remove('in');
+  } else {
+    $('#live').textContent = us + ' us';
+    m.style.left = pct(us) + '%';
+    m.classList.toggle('in', inWindow(us));
+  }
+}
+
+// Signal as four bars. RSSI is a log scale nobody reads at a glance, but
+// "yours is the full one" needs no explanation.
+function bars(rssi) {
+  const n = rssi > -55 ? 4 : rssi > -70 ? 3 : rssi > -82 ? 2 : 1;
+  let h = '<span class="bars">';
+  for (let i = 1; i <= 4; i++)
+    h += `<i class="${i <= n ? 'on' : ''}" style="height:${4 + i * 3}px"></i>`;
+  return h + '</span>';
+}
+
+let armedMac = null, armTimer = null;
+
+function renderCams(cams) {
+  const box = $('#camList');
+  if (!cams.length) {
+    box.innerHTML = '<div class="note">Looking for cameras… switch yours on ' +
+                    'and keep it close to the module.</div>';
+    return;
+  }
+  // Rebuild only when something STRUCTURAL has changed -- which cameras are
+  // listed, and which is selected or armed. RSSI is deliberately not in this
+  // key: it moves by ten dB between adverts on a stationary camera, so keying
+  // on it rebuilt the whole list roughly every poll, and a tap could land on an
+  // element that a 400 ms refresh had already replaced. The bars are refreshed
+  // in place below instead, which is the only part that actually changed.
+  const key = cams.map(c => c.id + c.bound).join('|') + '#' + armedMac;
+  if (box.dataset.key === key) { paintBars(cams); return; }
+  box.dataset.key = key;
+
+  box.innerHTML = cams.map(c => {
+    const cls = c.id === armedMac ? 'armed' : (c.bound ? 'sel' : '');
+    const label = c.id === armedMac ? 'Tap again to select'
+                : c.bound          ? 'Selected'
+                : (c.model || c.name || 'Camera');
+    // data-id is the separator-free form the firmware parses; c.mac with its
+    // colons is for the human reading the row.
+    return `<div class="cam ${cls}" data-id="${c.id}">
+      <div class="info"><div class="nm">${c.name || c.model || 'Camera'}</div>
+      <div class="sub">${label} · ${c.mac}</div></div>${bars(c.rssi)}</div>`;
+  }).join('');
+
+  box.querySelectorAll('.cam').forEach(el => {
+    el.onclick = () => selectCam(el.dataset.id);
+  });
+  paintBars(cams);
+}
+
+// Signal strength changes constantly; the rows must not. Swap the bars inside
+// the existing elements so nothing the user is reaching for moves or is
+// replaced mid-tap.
+function paintBars(cams) {
+  cams.forEach(c => {
+    const el = $(`#camList .cam[data-id="${c.id}"] .bars`);
+    if (!el) return;
+    const n = c.rssi > -55 ? 4 : c.rssi > -70 ? 3 : c.rssi > -82 ? 2 : 1;
+    el.querySelectorAll('i').forEach((bar, i) => bar.classList.toggle('on', i < n));
+  });
+}
+
+// Two-tap, like every other destructive action on this page: rebinding points
+// the module at a different camera, and a stray tap in a list should not do it.
+async function selectCam(id) {
+  if (armedMac !== id) {
+    armedMac = id;
+    clearTimeout(armTimer);
+    armTimer = setTimeout(() => { armedMac = null; $('#camList').dataset.key = ''; }, 5000);
+    $('#camList').dataset.key = '';
+    return;
+  }
+  clearTimeout(armTimer);
+  armedMac = null;
+  try {
+    const r = await fetch('/api/bind', {
+      method: 'POST',
+      body: new URLSearchParams({mac: id})
+    });
+    toast(r.ok ? 'Camera selected' : 'Could not select: ' + (await r.text()));
+  } catch (e) { toast('Could not select'); }
+  $('#camList').dataset.key = '';
+}
+
+async function poll() {
+  try {
+    const s = await (await fetch('/api/state', {cache: 'no-store'})).json();
+    if (!loaded) { fill(s); loaded = true; }
+    live(s);
+    const sc = await (await fetch('/api/scan', {cache: 'no-store'})).json();
+    window._lastCams = sc.cams || [];
+    renderCams(sc.cams || []);
+  } catch (e) { /* the module reboots out from under us on purpose */ }
+}
+
+
+// ---- OSD layout editor ----------------------------------------------------
+// The catalogue (names, examples and worst-case widths) comes from the
+// firmware, not from here. Widths belong to the renderer, and a copy of them in
+// this file would be a second source of truth that drifts the first time a
+// field is added.
+let CAT = {}, OSDMAX = 16, layout = null, osdDirty = false;
+const ROWS = 4, ROW_FIELDS = 4;
+
+function setOsdDirty(v) {
+  osdDirty = v;
+  $('#osdSave').textContent = v ? 'Save layout' : 'Saved';
+  $('#osdSave').classList.toggle('dirty', v);
+}
+
+const rowWidth = r => r.reduce((w, id, i) => w + CAT[id].w + (i ? 1 : 0), 0);
+const pad = (t, n) => (t + ' '.repeat(n)).slice(0, n);
+
+function drawOsd() {
+  // Never rebuild the grid mid-drag: replacing the tiles destroys the element
+  // the pointer is captured on, its pointerup never fires, and the floating
+  // clone is left stuck over the page. The drag's own pointerup clears `drag`
+  // before it calls drawOsd, so a legitimate redraw still gets through.
+  if (drag) return;
+  document.querySelectorAll('.otile.drag').forEach(g => g.remove());  // sweep orphans
+  const box = $('#rows');
+  box.innerHTML = layout.map((r, i) => {
+    const w = rowWidth(r), over = w > OSDMAX;
+    const pctW = Math.min(100, w * 100 / OSDMAX);
+    return `<div class="orow${over ? ' bad' : ''}" data-row="${i}">
+      <div class="oslots">${r.length ? r.map((id, j) =>
+        `<span class="otile" data-row="${i}" data-idx="${j}" data-id="${id}"
+         style="min-width:${CAT[id].w}ch">${CAT[id].name}</span>`).join('')
+        : '<span class="ohint">Row ' + (i + 1) + ' — empty</span>'}</div>
+      <div class="obar${over ? ' bad' : ''}"><i style="width:${pctW}%"></i></div>
+      <div class="ometa"><span>Row ${i + 1}</span>
+        <span class="${over ? 'over' : ''}">${w} / ${OSDMAX}${over ? ' — too long' : ''}</span>
+      </div></div>`;
+  }).join('');
+
+  // The tray holds every field not currently placed. A field can only be in one
+  // row: putting the same reading on screen twice is never what was meant, and
+  // allowing it would double-charge the budget for no gain.
+  const used = new Set(layout.flat());
+  $('#tray').innerHTML = Object.keys(CAT).filter(id => +id && !used.has(+id))
+    .map(id => `<span class="otile" data-row="-1" data-id="${id}"
+      style="min-width:${CAT[id].w}ch">${CAT[id].name}</span>`).join('')
+    || '<span class="ohint">All fields placed</span>';
+
+  $('#osdPrev').textContent = layout.map(r =>
+    r.length ? r.map(id => pad(CAT[id].ex, CAT[id].w)).join(' ') : ' ').join('\n');
+
+  $('#osdSave').disabled = layout.some(r => rowWidth(r) > OSDMAX);
+  bindTiles();
+}
+
+// Pointer events rather than HTML5 drag-and-drop: the settings page is opened
+// on a phone, and native dragstart/drop does not fire for touch at all. This
+// works the same for a finger and a mouse.
+let drag = null;
+// Safety net: if the dragged tile is torn out from under us (a redraw, an error
+// mid-drag), its own pointerup cannot fire. Catch the event at the window and
+// clean up, so a stuck clone can never block the page until a restart.
+window.addEventListener('pointerup', () => {
+  if (drag && !document.body.contains(drag.el)) {
+    if (drag.ghost) drag.ghost.remove();
+    drag = null;
+    document.querySelectorAll('.otile.drag').forEach(g => g.remove());
+    holdRedraw(400);
+    drawOsd();
+  }
+});
+window.addEventListener('pointercancel', () => {
+  if (drag) {
+    if (drag.ghost) drag.ghost.remove();
+    drag = null;
+    document.querySelectorAll('.otile.drag').forEach(g => g.remove());
+    drawOsd();
+  }
+});
+function bindTiles() {
+  document.querySelectorAll('.otile').forEach(el => {
+    el.onpointerdown = e => {
+      e.preventDefault();
+      document.querySelectorAll('.otile.drag').forEach(g => g.remove());
+      const ghost = el.cloneNode(true);
+      ghost.classList.add('drag');
+      const r = el.getBoundingClientRect();
+      ghost.style.width = r.width + 'px';
+      ghost.style.left = r.left + 'px';
+      ghost.style.top = r.top + 'px';
+      document.body.appendChild(ghost);
+      el.classList.add('ghosted');
+      drag = { el, ghost, id: +el.dataset.id,
+               from: +el.dataset.row, idx: +(el.dataset.idx ?? -1),
+               dx: e.clientX - r.left, dy: e.clientY - r.top };
+      el.setPointerCapture(e.pointerId);
+      holdRedraw(2000);                // keep the poll from redrawing mid-drag
+    };
+    el.onpointermove = e => {
+      if (!drag) return;
+      drag.ghost.style.left = (e.clientX - drag.dx) + 'px';
+      drag.ghost.style.top  = (e.clientY - drag.dy) + 'px';
+      const t = document.elementFromPoint(e.clientX, e.clientY);
+      document.querySelectorAll('.orow').forEach(x => x.classList.remove('over'));
+      const row = t && t.closest('.orow');
+      if (row) row.classList.add('over');
+    };
+    el.onpointerup = e => {
+      if (!drag) return;
+      const t = document.elementFromPoint(e.clientX, e.clientY);
+      const row = t && t.closest('.orow');
+      const tray = t && t.closest('#tray');
+      drag.ghost.remove();
+      document.querySelectorAll('.orow').forEach(x => x.classList.remove('over'));
+
+      if (drag.from >= 0) layout[drag.from].splice(drag.idx, 1);
+      if (row) {
+        const dest = +row.dataset.row;
+        if (layout[dest].length < ROW_FIELDS) {
+          // Drop where the finger is, not always at the end: order within a row
+          // is what decides which reading sits where on screen.
+          const tiles = [...row.querySelectorAll('.otile')].filter(x => x !== drag.el);
+          let at = tiles.findIndex(x => {
+            const b = x.getBoundingClientRect();
+            return e.clientX < b.left + b.width / 2;
+          });
+          layout[dest].splice(at < 0 ? layout[dest].length : at, 0, drag.id);
+        } else if (drag.from >= 0) {
+          layout[drag.from].splice(drag.idx, 0, drag.id);   // full: put it back
+          toast('That row already holds four fields');
+        }
+      } else if (!tray && drag.from >= 0) {
+        layout[drag.from].splice(drag.idx, 0, drag.id);     // dropped nowhere
+      }
+      drag = null;
+      holdRedraw(400);
+      setOsdDirty(true);
+      drawOsd();
+    };
+    el.onpointercancel = el.onpointerup;
+  });
+}
+
+$('#osdReset').onclick = () => {
+  layout = [[1, 7], [2], [3], [5]];    // state+dot, clip, battery, card
+  setOsdDirty(true);
+  drawOsd();
+};
+
+$('#osdSave').onclick = async () => {
+  const flat = layout.map(r => [...r, ...Array(ROW_FIELDS - r.length).fill(0)]).flat();
+  try {
+    const r = await fetch('/api/osd', {
+      method: 'POST', body: new URLSearchParams({osd: flat.join(',')}),
+    });
+    if (r.ok) setOsdDirty(false);
+    toast(r.ok ? 'Layout saved' : 'Rejected: ' + (await r.text()));
+  } catch (e) { toast('Save failed'); }
+};
+
+$('#save').onclick = async () => {
+  const body = new URLSearchParams({
+    mode: $('input[name=mode]:checked').value,
+    tx:   $('input[name=tx]:checked').value,
+    kind: $('input[name=kind]:checked').value,
+    txauto: $('#txauto').checked ? 1 : 0,
+    cfgaux:  $('#cfgaux').value,
+    hilight: $('#hilight').value,
+    stopdelay: $('#stopdelay').value,
+    cfgkind: $('input[name=cfgkind]:checked').value,
+    cfghold: $('#cfghold').value,
+    aux:  $('#aux').value,
+    min:  $('#min').value,
+    max:  $('#max').value,
+  });
+  try {
+    const r = await fetch('/api/config', {method: 'POST', body});
+    if (r.ok) setDirty(false);
+    toast(r.ok ? 'Saved' : 'Rejected: ' + (await r.text()));
+  } catch (e) { toast('Save failed'); }
+};
+
+// Native confirm()/alert() are unreliable inside a captive-portal sheet --
+// the stripped-down web view a phone opens on joining a network can return
+// false without ever showing anything, which reads as "the button does
+// nothing". Both destructive actions below are therefore two-step in-page,
+// using only DOM, which works the same everywhere.
+function arm(btn, prompt, action) {
+  let armed = false, timer = null;
+  const original = btn.textContent;
+  btn.onclick = () => {
+    if (!armed) {
+      armed = true;
+      // Resolved at press time, not at wire time: the Done button has to be
+      // able to say whether this restart is about to throw an edit away.
+      btn.textContent = (typeof prompt === 'function') ? prompt() : prompt;
+      btn.classList.add('armed');
+      timer = setTimeout(() => {
+        armed = false; btn.textContent = original; btn.classList.remove('armed');
+      }, 5000);
+      return;
+    }
+    clearTimeout(timer);
+    armed = false; btn.textContent = original; btn.classList.remove('armed');
+    action();
+  };
+}
+
+pollTimer = setInterval(() => { if (redrawAllowed()) poll(); }, 400);
+
+// ---- firmware update ------------------------------------------------------
+let fwBlob = null;
+$('#fwFile').onchange = () => {
+  fwBlob = $('#fwFile').files[0] || null;
+  $('#fwName').textContent = fwBlob
+    ? `${fwBlob.name} (${(fwBlob.size / 1048576).toFixed(2)} MB)` : 'No file chosen';
+  $('#fwGo').disabled = !fwBlob;
+  if (fwBlob && fwBlob.size < 100000) {
+    $('#fwNote').innerHTML = '<b style="color:var(--warn)">That file is only ' +
+      Math.round(fwBlob.size / 1024) + ' KB — an update is normally over 1 MB. ' +
+      'Check you picked the update file.</b>';
+  }
+};
+
+$('#fwGo').onclick = () => {
+  if (!fwBlob) return;
+  // Polling competes with a 1.4 MB upload for the module's few sockets, and
+  // nothing on screen matters more than the transfer right now.
+  clearInterval(pollTimer);
+
+  $('#fwGo').disabled = true;
+  $('#fwGo').textContent = 'Uploading…';
+  $('#fwTrack').style.display = 'block';
+
+  // XMLHttpRequest rather than fetch: fetch has no upload progress events, and
+  // a minute-long transfer with no feedback is indistinguishable from a hang.
+  const x = new XMLHttpRequest();
+  x.open('POST', '/api/update');
+  x.upload.onprogress = ev => {
+    if (!ev.lengthComputable) return;
+    const p = 100 * ev.loaded / ev.total;
+    $('#fwBar').style.width = p + '%';
+    $('#fwGo').textContent = `Uploading ${p.toFixed(0)}%`;
+  };
+  x.onload = () => {
+    if (x.status === 200) {
+      document.body.innerHTML =
+        '<div class="wrap" style="padding:48px 16px"><h1>Installing</h1>' +
+        '<p class="meta">The module is restarting on the new version. ' +
+        '<b>Leave it powered for 30 seconds</b> — it has to prove it runs ' +
+        'before it is kept. If it cannot, the previous version comes back ' +
+        'by itself.</p></div>';
+    } else {
+      $('#fwGo').textContent = 'Install';
+      $('#fwGo').disabled = false;
+      $('#fwNote').innerHTML = '<b style="color:var(--bad)">Rejected: ' +
+        (x.responseText || x.status) + '</b>';
+      pollTimer = setInterval(() => { if (redrawAllowed()) poll(); }, 400);
+    }
+  };
+  x.onerror = () => {
+    $('#fwGo').textContent = 'Install';
+    $('#fwGo').disabled = false;
+    $('#fwNote').innerHTML =
+      '<b style="color:var(--bad)">Upload failed — the module still has its ' +
+      'old firmware.</b>';
+    pollTimer = setInterval(() => { if (redrawAllowed()) poll(); }, 400);
+  };
+  x.send(fwBlob);
+};
+
+arm($('#done'), () => (dirty || osdDirty)
+      ? 'Unsaved — tap again to discard' : 'Tap again to restart', () => {
+  clearInterval(pollTimer);          // stop polling a module that is going away
+  fetch('/api/exit', {method: 'POST'}).catch(() => {});
+
+  document.body.innerHTML =
+    '<div class="wrap" style="padding:48px 16px"><h1>Restarting</h1>' +
+    '<p class="meta">The SlateFPV network is closing. The module is back to ' +
+    'normal operation &mdash; you can close this page.</p></div>';
+
+  // Best effort only. A browser lets a page close a window that a SCRIPT
+  // opened; a captive-portal sheet usually honours it, a tab the user opened
+  // themselves never will. So the screen above is the real answer and this is
+  // the bonus -- never the other way round.
+  setTimeout(() => { try { window.close(); } catch (e) {} }, 400);
+});
+
+arm($('#repair'), 'Tap again to forget keys', async () => {
+  try {
+    const r = await fetch('/api/repair', {method: 'POST'});
+    toast(r.ok ? 'Pairing keys forgotten — the camera will ask to pair again'
+               : 'Could not clear the keys');
+  } catch (e) { toast('Could not clear the keys'); }
+});
+
+arm($('#forget'), 'Tap again to release', async () => {
+  try {
+    const r = await fetch('/api/forget', {method: 'POST'});
+    toast(r.ok ? 'Camera released' : 'Failed');
+    $('#camList').dataset.key = '';
+  } catch (e) { toast('Failed'); }
+});
+
+poll();
+</script>
+<script type="module">
+import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.5.4/bundle.js";
+const $=s=>document.querySelector(s);
+const flog=t=>{const e=$('#flashLog');if(e){e.textContent=(e.textContent+t+'\n').split('\n').slice(-60).join('\n');e.scrollTop=9e9;}};
+const setBar=f=>{const w=$('#flashBarWrap'),b=$('#flashBar');if(w){w.style.display='';b.style.width=Math.round(f*100)+'%';}};
+async function binStr(ab){const u=new Uint8Array(ab);let s='';const C=0x8000;for(let i=0;i<u.length;i+=C)s+=String.fromCharCode.apply(null,u.subarray(i,i+C));return s;}
+async function fetchBin(name){flog('Fetching '+name+'…');const r=await fetch('firmware/'+name,{cache:'no-store'});if(!r.ok)throw new Error(name+' not found');return binStr(await r.arrayBuffer());}
+async function fromFile(f){return binStr(await f.arrayBuffer());}
+async function flash(getData, address, label){
+  const btns=[$('#flashUpdate'),$('#flashFull')].filter(Boolean);btns.forEach(b=>b.disabled=true);setBar(0);
+  let transport;
+  try{
+    flog('Select the SlateFPV serial port in the chooser…');
+    const port=await navigator.serial.requestPort();
+    transport=new Transport(port,false);
+    const loader=new ESPLoader({transport,baudrate:115200,romBaudrate:115200,
+      terminal:{clean(){},writeLine(d){flog(d);},write(d){}}});
+    const chip=await loader.main();
+    flog('Connected: '+chip);
+    const data=await getData();
+    flog(label+': writing '+data.length+' bytes at 0x'+address.toString(16)+' — do not unplug…');
+    await loader.writeFlash({fileArray:[{data,address}],flashSize:'keep',eraseAll:false,compress:true,
+      reportProgress:(i,w,t)=>setBar(w/t)});
+    setBar(1);
+    flog('Written. Restarting the board…');
+    await loader.after();
+    flog('Done. The board is booting into setup — click “Connect over USB”.');
+  }catch(e){flog('Flash failed: '+(e&&e.message?e.message:e));}
+  finally{try{await transport?.disconnect();}catch(e){}btns.forEach(b=>b.disabled=false);}
+}
+$('#flashToggle').onclick=()=>{const p=$('#flashPanel');p.style.display=p.style.display==='none'?'':'none';};
+// Update: write only the app slot (0x20000), leaving NVS -- and your settings -- untouched.
+$('#flashUpdate').onclick=()=>flash(()=>fetchBin('slate-app.bin'), 0x20000, 'Update (keeps settings)');
+// Full install: the merged image at 0x0, which resets settings. For a blank board or a clean slate.
+$('#flashFull').onclick=()=>{ if(confirm('A full install resets saved settings. Use this for a blank board or a clean slate. Continue?')) flash(()=>fetchBin('slate-full.bin'), 0, 'Full install'); };
+$('#flashFile').onchange=e=>{if(e.target.files[0])flash(()=>fromFile(e.target.files[0]), 0, 'Custom .bin');};
+</script>
+</body>
+</html>

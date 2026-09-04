@@ -20,6 +20,36 @@ config CAMLINK_BENCH
       with the camera switched off, and vice versa. Recording only ever changes
       on an explicit keypress.
 
+config CAMLINK_SNIFF
+    bool "DIAG: log every BLE advertisement seen while scanning"
+    default n
+    help
+      Bring-up aid. In setup and bind modes, logs every BLE device heard --
+      name, address, signal, connectable flag and the raw advert bytes -- so a
+      camera the vendor filters do not recognise can be identified from what it
+      actually broadcasts. Noisy; leave off for normal use.
+
+config CAMLINK_GPSETTINGS_DUMP
+    bool "DIAG: dump every GoPro setting the camera reports"
+    default n
+    help
+      Registers for all GoPro settings and logs each id/value, to find out what
+      a camera reports for resolution and framerate. Noisy; off for normal use.
+
+config CAMLINK_USB_CONSOLE
+    bool "USB console (command prompt on the USB-C port)"
+    default y
+    help
+      A line-at-a-time prompt on the Supermini's native USB port, sharing it
+      with the log: `st` for camera and flight-controller state, `rec` to
+      start and stop recording, `scan` for the setup-mode camera list, and a
+      few housekeeping commands. Type `help`.
+
+      Reachable only with a cable in the port, which a flying module does not
+      have, so it is on by default. It reads the receive FIFO directly and
+      never installs the USB driver, so the log's behaviour with no host
+      attached is unchanged.
+
 choice CAMLINK_BLE_TX_POWER
     prompt "BLE transmit power"
     default CAMLINK_TX_N24

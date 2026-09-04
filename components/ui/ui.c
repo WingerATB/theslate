@@ -23,6 +23,8 @@ typedef struct { uint16_t on_ms, off_ms; } pattern_t;
 
 static const pattern_t k_patterns[] = {
     [UI_LED_CONFIG]    = {   0,    1 },   /* dark                           */
+    [UI_LED_BINDING]   = { 100,  100 },   /* fast, 5 Hz: actively looking   */
+    [UI_LED_WARN]      = {  90,  110 },   /* urgent, ~5 Hz: something wrong  */
     [UI_LED_RECORDING] = { 900,  100 },   /* solid with a dip once a second */
     [UI_LED_CONNECTED] = {   1,    0 },   /* solid on                       */
     [UI_LED_SEARCHING] = { 120,  880 },   /* slow, ~1 Hz                    */
@@ -52,9 +54,21 @@ static void ui_task(void *arg)
     int      phase   = 0;
     uint32_t phase_ms = 0;
 
+    /* A press already down when this task starts is the tail of the gesture
+     * that caused this boot: the hand that held ten seconds for setup is still
+     * on the button when the new image comes up. Counting it would turn a
+     * three-second overrun into a long press -- which in setup mode means
+     * "leave" -- so the page vanished before the phone could reach it. Ignore
+     * the button until it has been released once. */
+    bool held_at_boot = (gpio_get_level(UI_BUTTON_GPIO) == 0);
+
     for (;;) {
         /* ---- button ---- */
         int raw = gpio_get_level(UI_BUTTON_GPIO);   /* 0 = pressed */
+        if (held_at_boot) {
+            if (raw != 0) held_at_boot = false;   /* released: start listening */
+            raw = 1;
+        }
         if (raw != last_raw) {
             last_raw = raw;
             stable_ms = 0;
@@ -69,8 +83,9 @@ static void ui_task(void *arg)
                     vlong_fired = false;
                 } else if (!now_pressed && pressed) {
                     pressed = false;
-                    if (!long_fired && s_cb) {
-                        s_cb(UI_BTN_SHORT);
+                    if (s_cb) {
+                        if (!long_fired)       s_cb(UI_BTN_SHORT);
+                        else if (!vlong_fired) s_cb(UI_BTN_LONG_RELEASE);
                     }
                 }
             }
