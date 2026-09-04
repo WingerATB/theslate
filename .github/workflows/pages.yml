@@ -1,0 +1,154 @@
+# Build every supported chip and publish the browser flasher with the images
+# sitting beside it.
+#
+# WHY THE IMAGES ARE PUBLISHED HERE rather than linked from the Release: GitHub
+# serves release assets with no CORS header, so a browser cannot fetch one from
+# another origin -- the page would be blocked before it read a byte. Putting the
+# images next to the page makes them same-origin, which is the only arrangement
+# that works without a server of our own.
+#
+# They are not committed. The workflow builds them and hands them to Pages as an
+# artifact, so the repository stays source-only.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and never cancel one halfway: an interrupted deploy can
+# leave the page live with a partial set of images, which is worse than an old
+# page.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32c3, esp32s3, esp32c6, esp32c61, esp32c5, esp32]
+    container: espressif/idf:v5.5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Built from the tracked defaults in a directory of its own, exactly as
+      # tools/release.sh does it. A page that serves a differently-built image
+      # from the one a release ships would be worse than no page.
+      # The IDF container runs as root while the checkout is owned by another
+      # uid, so git refuses to touch it -- "detected dubious ownership". The
+      # build calls git, so without this the first run fails on something that
+      # has nothing to do with the firmware.
+      - name: Let git use the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build ${{ matrix.target }}
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py -B "build-pages" -D SDKCONFIG="build-pages/sdkconfig.pages" \
+                 -D IDF_TARGET=${{ matrix.target }} build
+
+      # The bench console can rebind the module to any MAC, drop its camera link
+      # and clear its BLE bonds. It must never reach a public download.
+      - name: Refuse an image carrying the bench console
+        shell: bash
+        run: |
+          if grep -q '^CONFIG_CAMLINK_BENCH=y' build-pages/sdkconfig.pages; then
+            echo "::error::built WITH the bench console"; exit 1
+          fi
+          if grep -aq "BENCH CONSOLE ACTIVE" build-pages/slate.bin; then
+            echo "::error::the image contains the bench console"; exit 1
+          fi
+
+      # -full.bin is bootloader + partition table + app + a fresh OTA selector,
+      # written at 0x0. -update.bin is the app alone, written at the first OTA
+      # slot, which leaves NVS -- and therefore the user's cameras and settings
+      # -- untouched.
+      - name: Package both images
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          mkdir -p out
+          cp build-pages/slate.bin "out/slate-${{ matrix.target }}-update.bin"
+          ( cd build-pages && esptool.py --chip ${{ matrix.target }} merge_bin \
+              -o "../out/slate-${{ matrix.target }}-full.bin" @flash_args )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ matrix.target }}
+          path: out/*.bin
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: images-*
+          merge-multiple: true
+          path: site
+
+      - name: Assemble the site
+        shell: bash
+        run: |
+          cp webtool/index.html site/index.html
+
+          # The manifest is written HERE, from what was actually built, rather
+          # than being maintained by hand in the page. Adding a target to the
+          # matrix above therefore adds it to the tool, and a target whose build
+          # failed simply is not offered -- which is the honest outcome, and one
+          # nobody has to remember to keep in step.
+          VER="$(cat VERSION)"
+          {
+            echo '{'
+            echo "  \"version\": \"${VER}\","
+            # Where the app slot and the OTA selector live. Read from
+            # partitions.csv rather than repeated here, because a layout change
+            # that did not reach this file would write firmware to the wrong
+            # address on somebody else's board.
+            APP=$(awk -F',' '/^ota_0/ {gsub(/ /,"",$4); print $4}' partitions.csv)
+            OTAD=$(awk -F',' '/^otadata/ {gsub(/ /,"",$4); print $4}' partitions.csv)
+            echo "  \"otadata_address\": $((OTAD)),"
+            echo '  "targets": {'
+            first=1
+            for f in site/slate-*-full.bin; do
+              [ -e "$f" ] || continue
+              b=$(basename "$f"); t=${b#slate-}; t=${t%-full.bin}
+              [ -e "site/slate-${t}-update.bin" ] || continue
+              [ $first -eq 1 ] || echo ','
+              first=0
+              printf '    "%s": {\n' "$t"
+              printf '      "full":   {"file": "slate-%s-full.bin",   "address": 0},\n' "$t"
+              printf '      "update": {"file": "slate-%s-update.bin", "address": %d}\n' "$t" "$((APP))"
+              printf '    }'
+            done
+            echo
+            echo '  }'
+            echo '}'
+          } > site/manifest.json
+
+          # Jekyll would otherwise try to process this and drop the .bin files.
+          touch site/.nojekyll
+          cat site/manifest.json
+          ls -l site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

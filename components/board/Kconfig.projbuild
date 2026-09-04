@@ -1,0 +1,79 @@
+menu "SlateFPV board"
+
+choice SLATE_BOARD
+    prompt "Board"
+    default SLATE_BOARD_C3_SUPERMINI if IDF_TARGET_ESP32C3
+    default SLATE_BOARD_GENERIC
+    help
+      Which physical board this image is for.
+
+      The chip is necessary and not sufficient. Two boards carrying the same
+      part can put the LED on different pins, drive it with opposite polarity,
+      or have no LED at all -- so selecting a target is not the same as
+      selecting a board, and only the pins below decide what gets driven.
+
+config SLATE_BOARD_C3_SUPERMINI
+    bool "ESP32-C3 Supermini"
+    depends on IDF_TARGET_ESP32C3
+    help
+      The board SlateFPV ships and flies on. LED on GPIO8 (inverted), BOOT
+      button on GPIO9. Both are strapping pins and nothing else may be wired
+      to them.
+
+config SLATE_BOARD_GENERIC
+    bool "Other board -- set the pins below"
+    help
+      Any other board. Nothing is assumed about it: the LED is absent unless
+      you give it a pin.
+
+endchoice
+
+config SLATE_LED_GPIO
+    int "Status LED GPIO (-1 for none)"
+    depends on SLATE_BOARD_GENERIC
+    range -1 48
+    default -1
+    help
+      -1 means this board has no LED we can drive, and every LED state becomes
+      a no-op.
+
+      That is the default on purpose. Several dev boards -- the S3 DevKitC and
+      the C6 DevKitC among them -- put an addressable WS2812 where the C3
+      Supermini has a plain LED, and this firmware drives a plain LED only.
+      Pointing it at a WS2812's data pin will not light it, and pointing it at
+      a pin that carries something else can do worse than nothing.
+
+      Check your board's schematic. A dark LED is a much better failure than a
+      pin driven by mistake.
+
+config SLATE_LED_ACTIVE_LOW
+    bool "LED lights when the pin is LOW"
+    depends on SLATE_BOARD_GENERIC
+    default y
+    help
+      True when the LED sits between 3V3 and the pin, which is the common
+      arrangement on dev boards.
+
+config SLATE_BUTTON_GPIO
+    int "Button GPIO (-1 for none)"
+    depends on SLATE_BOARD_GENERIC
+    range -1 48
+    default 9 if IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32C6 || IDF_TARGET_ESP32C61 || IDF_TARGET_ESP32C5 || IDF_TARGET_ESP32C2
+    default 0
+    help
+      Defaults to the BOOT button, which nearly every dev board has: GPIO9 on
+      the RISC-V parts, GPIO0 on the S3 and the original ESP32.
+
+      Worth having. The button is the recovery gesture -- a ten second hold
+      enters setup with no flight controller, no radio and no working camera
+      link involved. Set it to -1 only if the board genuinely has no button, in
+      which case setup is reachable only from the setup switch or a cable.
+
+config SLATE_BUTTON_ACTIVE_LOW
+    bool "Button reads LOW when pressed"
+    depends on SLATE_BOARD_GENERIC
+    default y
+    help
+      True for a button to ground with a pull-up, which is what BOOT is.
+
+endmenu

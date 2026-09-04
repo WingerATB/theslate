@@ -13,6 +13,10 @@
  * The widths below are worst cases, not typical ones. "12:34" is what a clip
  * counter usually looks like; "1092:15" is what it looks like when a uint16 of
  * seconds runs out, and that is the number the row has to be built for.
+ *
+ * IDS ARE STORED IN NVS as part of the user's layout, so this enum is APPEND
+ * ONLY. Renumbering it would rearrange the OSD of every module in the field on
+ * the update that did it.
  */
 #ifndef OSD_FIELDS_H
 #define OSD_FIELDS_H
@@ -29,6 +33,7 @@ typedef enum {
     OSD_F_CARD_SHORT,   /* 1H49    -- the same, without the label            */
     OSD_F_DOT,          /* the liveness dot                                  */
     OSD_F_CAMERA,       /* NANO / O360 / A5 -- which camera is bound         */
+    OSD_F_WARN,         /* NOT REC / NO SD / CAM HOT -- blank when all is well*/
     OSD_F__COUNT
 } osd_field_t;
 

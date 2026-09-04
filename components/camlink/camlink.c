@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "camlink.h"
+#include "camlink_warn.h"
 #include "msp.h"
 
 #include "freertos/FreeRTOS.h"
@@ -19,6 +20,7 @@
 #include "camlink_cfg.h"
 #include "ble.h"
 #include "esp_bt.h"
+#include "board.h"
 
 static const char *TAG = "SLATE";
 
@@ -86,6 +88,11 @@ static volatile bool s_manual_record;
 /* Last OSD frame, for the bench readout. Written only by the logic task. */
 static char s_osd[4][17];
 
+/* The warning in force. Written by the logic task, read by the LED task. */
+static volatile camlink_warn_t s_warn = CAM_WARN_NONE;
+
+camlink_warn_t camlink_get_warn(void) { return s_warn; }
+
 void camlink_get_osd(char out[4][17])
 {
     if (out == NULL) return;
@@ -95,19 +102,6 @@ void camlink_get_osd(char out[4][17])
 static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
-}
-
-/* cfg_tx_t -> esp_power_level_t. Duplicated from app_main deliberately: the
- * mapping belongs with whoever applies it, and camlink is the only thing that
- * changes power at runtime. */
-static int tx_level_for_cfg(uint8_t cfg_tx)
-{
-    switch (cfg_tx) {
-    case CFG_TX_N12: return ESP_PWR_LVL_N12;
-    case CFG_TX_N0:  return ESP_PWR_LVL_N0;
-    case CFG_TX_P3:  return ESP_PWR_LVL_P3;
-    default:         return ESP_PWR_LVL_N24;
-    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -278,6 +272,9 @@ void camlink_logic_task(void *arg)
     uint8_t  tx_now     = 0;             /* level currently applied           */
     bool     tx_applied = false;
     bool     want        = false;
+    camlink_stopdelay_t sd = {0};        /* post-roll                        */
+    uint32_t unmet_since = 0;            /* when the want first went unmet   */
+    bool     unmet_seen  = false;
     char     prev[4][17] = {{0}};
     bool     first_push  = true;
     uint32_t last_full_push = 0;
@@ -315,10 +312,10 @@ void camlink_logic_task(void *arg)
          * meaningless and turning the radio down would fight the setup this is
          * meant to help. */
         if (cfg.tx_auto && ever_had_fc) {
-            uint8_t want_tx = m.armed ? CFG_TX_N24 : cfg.tx_power;
+            uint8_t want_tx = m.armed ? CFG_TX_QUIETEST : cfg.tx_power;
             if (!tx_applied || want_tx != tx_now) {
-                camlink_ble_apply_tx_level(tx_level_for_cfg(want_tx));
-                ESP_LOGI(TAG, "BLE tx -> %s (%s)", camlink_cfg_tx_name(want_tx),
+                camlink_ble_apply_tx_level(board_tx_level(want_tx));
+                ESP_LOGI(TAG, "BLE tx -> %s (%s)", board_tx_name(want_tx),
                          m.armed ? "armed" : "disarmed");
                 tx_now = want_tx;
                 tx_applied = true;
@@ -405,11 +402,69 @@ void camlink_logic_task(void *arg)
             .cam_recording = cam.recording,
             .unsent        = unsent,
         };
+        /* An automatic STOP specifically, not merely a move -- captured here
+         * because auto_prev is about to be overwritten and the answer needs
+         * both values. */
+        bool auto_stop = oin.auto_moved && !auto_want;
+
         auto_prev = auto_want;
         auto_seen = true;
 
         want = camlink_ovr_update(&ovr, &oin);
         s_manual_record = ovr.active && ovr.want;
+
+        /* Post-roll, layered on top of the intent rather than inside it.
+         *
+         * It sits AFTER the override deliberately. The override is a person
+         * pressing a button; this is a guess about what they would have wanted
+         * had the aircraft not just hit the ground. A guess must not be able to
+         * overrule the person, which is what `overridden` says. */
+        uint8_t  sd_remain = 0;
+        uint32_t tnow = now_ms();
+        camlink_stopdelay_in_t sin = {
+            .auto_stop     = auto_stop,
+            .want          = want,
+            .overridden    = ovr.active,
+            .authority     = authority,
+            .cam_connected = cam.connected,
+            .delay_s       = cfg.stop_delay_s,
+            .now_ms        = tnow,
+        };
+        want = camlink_stopdelay_update(&sd, &sin, &sd_remain);
+        if (sd_remain) {
+            ESP_LOGD(TAG, "stop delayed, %u s left", (unsigned)sd_remain);
+        }
+
+        /* How long the camera has disagreed with us.
+         *
+         * Timed here rather than inside camlink_warn_pick(), which stays pure
+         * and testable at a desk. Reset the moment the disagreement ends, so a
+         * camera that starts late clears the warning rather than latching it. */
+        if (want && cam.recording_valid && !cam.recording) {
+            if (!unmet_seen) { unmet_since = tnow; unmet_seen = true; }
+        } else {
+            unmet_seen = false;
+        }
+        bool unmet_long = unmet_seen &&
+                          (tnow - unmet_since) >= CAMLINK_NOT_REC_GRACE_MS;
+
+        camlink_warn_in_t win = {
+            .cam_gone        = !cam.connected || !cam.recording_valid,
+            .want_record     = want,
+            .rec_valid       = cam.recording_valid,
+            .recording       = cam.recording,
+            .want_unmet_long = unmet_long,
+            .temp_valid      = cam.temp_over_valid,
+            .temp_over       = cam.temp_over,
+            .card_valid      = cam.remain_time_valid,
+            .card_s          = cam.remain_time_s,
+            .batt_valid      = cam.battery_valid,
+            .batt_pct        = cam.battery_pct,
+            .warn_batt_pct   = cfg.warn_batt_pct,
+            .warn_card_s     = (uint16_t)(cfg.warn_card_min * 60u),
+        };
+        camlink_warn_t warn = camlink_warn_pick(&win);
+        s_warn = warn;
 
         /* CUT: a press while armed ends the take and starts a fresh clip. The
          * queued cut is dropped whenever the intent is not to record, so an
@@ -472,10 +527,21 @@ void camlink_logic_task(void *arg)
          * whereas a 0.5 Hz dot is only noticed when you go looking for it --
          * which is exactly when it is needed. */
         static uint32_t osd_tick;
-        bool heartbeat = ((osd_tick++ / 4) & 1) == 0;
+        uint32_t tk = osd_tick++;
+        bool heartbeat = ((tk / 4) & 1) == 0;
+        /* Twice the dot's rate. Two things flashing at the same speed in the
+         * same corner of the screen read as one thing, and the whole point of a
+         * warning is that it is not the thing you were already ignoring. */
+        bool warn_on   = ((tk / 2) & 1) == 0;
+
+        camlink_osd_extra_t extra = {
+            .warn         = warn,
+            .warn_on      = warn_on,
+            .stop_delay_s = sd_remain,
+        };
         camlink_format_osd(&cam, m.link_up, want, 0, heartbeat,
                            (const uint8_t (*)[OSD_ROW_FIELDS])cfg.osd,
-                           s_setup_hint, lines);
+                           s_setup_hint, &extra, lines);
 
         memcpy(s_osd, lines, sizeof(s_osd));
 

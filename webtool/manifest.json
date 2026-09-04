@@ -1,0 +1,5 @@
+{
+  "note": "Written by the Pages workflow. Lists the images published beside this file, so the tool never has to be edited when a target is added or a version is cut.",
+  "version": "dev",
+  "targets": {}
+}

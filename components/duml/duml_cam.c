@@ -19,6 +19,7 @@
 #include "status_logic.h"
 #include "command_logic.h"
 #include "nvs_flash.h"
+#include "cam_bind.h"
 #include "esp_mac.h"
 #include "nvs.h"
 
@@ -72,6 +73,11 @@ static uint32_t           s_last_batt_ms;
 #define NVS_KEY_MODEL "cam_model"
 #define NVS_KEY_PROTO "cam_proto"
 #define NVS_KEY_LABEL "cam_label"
+/* The list. The four keys above are the SINGLE binding this replaced; they are
+ * still written, mirroring whichever camera is top priority, so a module rolled
+ * back to an older firmware still comes up on the right camera instead of
+ * looking unbound. They are read only once, to migrate. */
+#define NVS_KEY_LIST  "cam_list"
 
 /* Which protocol a camera speaks, decided by its advertised model code.
  *
@@ -153,87 +159,237 @@ static void label_for_camera(uint8_t model, const char *name, char out[6])
     strlcpy(out, "CAM", 6);
 }
 
-/* Persist the bound camera so the module comes back to the SAME camera after a
- * power cycle, instead of grabbing whichever one is nearest. */
-static void bind_load(void)
+/* The bound cameras, in priority order. Read from NVS once at start and kept
+ * in RAM: the connect sweep walks it on every reconnect, and going to flash for
+ * that would put a blocking read in the path of a camera coming back. */
+static cam_bind_list_t s_binds;
+static SemaphoreHandle_t s_bind_lock;
+
+static bool s_binds_loaded;
+static void bind_load_locked(void);
+
+/* Make the list usable, whoever asks first.
+ *
+ * It used to be enough to create the mutex here, because the list was only ever
+ * loaded by duml_cam_start(). CONFIG MODE NEVER CALLS THAT -- it runs with BLE
+ * switched off and the camera task not started -- so in setup the list stayed
+ * empty while NVS held the user's cameras. The settings page therefore showed
+ * none of them, and picking one wrote a ONE-CAMERA list over the top of
+ * however many were stored. Choosing a second camera would have silently
+ * forgotten the first.
+ *
+ * The single binding this replaced never had the problem: it read NVS on every
+ * call. Loading lazily restores that property -- whoever touches the list
+ * first, in either boot, gets it populated. */
+static void binds_ready(void)
+{
+    if (s_bind_lock == NULL) s_bind_lock = xSemaphoreCreateMutex();
+    if (s_binds_loaded) return;
+    if (s_bind_lock && xSemaphoreTake(s_bind_lock, portMAX_DELAY) != pdTRUE) return;
+    if (!s_binds_loaded) {
+        bind_load_locked();
+        s_binds_loaded = true;
+    }
+    if (s_bind_lock) xSemaphoreGive(s_bind_lock);
+}
+
+static void bind_list_store(void)
 {
     nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, NVS_KEY_LIST, &s_binds, sizeof(s_binds));
+
+    /* Mirror the top-priority camera into the four single-binding keys.
+     *
+     * Nothing in this firmware reads them any more. They are written so that a
+     * module rolled back to a build that predates the list still comes up bound
+     * to the camera the user put first, rather than looking like it was never
+     * set up at all. Rollback is a supported path here -- the OTA updater has a
+     * whole probation mechanism for it -- so it should not cost someone their
+     * setup. */
+    if (s_binds.n > 0) {
+        nvs_set_blob(h, NVS_KEY, s_binds.e[0].addr, 6);
+        nvs_set_u8(h, NVS_KEY_MODEL, s_binds.e[0].model);
+        nvs_set_u8(h, NVS_KEY_PROTO, s_binds.e[0].proto);
+        nvs_set_str(h, NVS_KEY_LABEL, s_binds.e[0].label);
+    } else {
+        nvs_erase_key(h, NVS_KEY);
+    }
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+/* Load the list, migrating a single binding written by an earlier firmware.
+ * Called with the lock held, exactly once, from binds_ready(). */
+static void bind_load_locked(void)
+{
+    nvs_handle_t h;
+    memset(&s_binds, 0, sizeof(s_binds));
+
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
         ESP_LOGW(TAG, "no camera selected -- hold the button 10 s and pick one in setup");
         return;
     }
-    uint8_t addr[6];
-    size_t len = sizeof(addr);
-    if (nvs_get_blob(h, NVS_KEY, addr, &len) == ESP_OK && len == sizeof(addr)) {
-        ble_set_bound_addr(addr);
-        uint8_t m = 0, pr = 0;
-        nvs_get_u8(h, NVS_KEY_MODEL, &m);
-        s_bound_model = m;
-        /* The protocol was resolved when the camera was chosen, using its name
-         * as well as its model code. The name is gone by now, so the decision
-         * is stored rather than recomputed. */
-        s_proto = (nvs_get_u8(h, NVS_KEY_PROTO, &pr) == ESP_OK)
-                      ? (cam_proto_t)pr : proto_for_camera(m, NULL);
-        size_t ll = sizeof(s_label);
-        if (nvs_get_str(h, NVS_KEY_LABEL, s_label, &ll) != ESP_OK) {
-            /* Bound by a firmware that predates the label. The model code is
-             * enough for every camera whose code is known, which is all of them
-             * except the Action 6 -- and that one only loses its digit until
-             * the next time it is picked in setup. */
-            label_for_camera(m, NULL, s_label);
-        }
-        ESP_LOGI(TAG, "bound camera model 0x%02X -> %s", m,
-                 s_proto == CAM_PROTO_RSDK ? "R SDK" : "DUML");
+
+    size_t len = sizeof(s_binds);
+    esp_err_t e = nvs_get_blob(h, NVS_KEY_LIST, &s_binds, &len);
+    if (e == ESP_OK && len == sizeof(s_binds) && s_binds.n <= CAM_BIND_MAX) {
+        nvs_close(h);
     } else {
-        ESP_LOGW(TAG, "no camera selected -- hold the button 10 s and pick one in setup");
+        /* No list. Look for the single binding this replaced and adopt it as
+         * priority 1, so an update does not cost anyone the camera they had.
+         * A blob of the wrong size is treated the same way: it was written by
+         * a build with a different CAM_BIND_MAX, and re-deriving from the
+         * mirrored single binding is better than trusting a partial parse. */
+        memset(&s_binds, 0, sizeof(s_binds));
+        uint8_t addr[6];
+        size_t al = sizeof(addr);
+        if (nvs_get_blob(h, NVS_KEY, addr, &al) == ESP_OK && al == sizeof(addr)) {
+            cam_bind_t c = {0};
+            memcpy(c.addr, addr, 6);
+            uint8_t m = 0, pr = 0;
+            nvs_get_u8(h, NVS_KEY_MODEL, &m);
+            c.model = m;
+            /* The protocol was resolved when the camera was chosen, using its
+             * name as well as its model code. The name is gone by now, so the
+             * decision is read back rather than recomputed. */
+            c.proto = (nvs_get_u8(h, NVS_KEY_PROTO, &pr) == ESP_OK)
+                          ? pr : (uint8_t)proto_for_camera(m, NULL);
+            size_t ll = sizeof(c.label);
+            if (nvs_get_str(h, NVS_KEY_LABEL, c.label, &ll) != ESP_OK) {
+                /* Bound by a firmware that predates the label. The model code
+                 * is enough for every camera whose code is known -- all of them
+                 * except the Action 6, which loses its digit until it is next
+                 * picked in setup. */
+                label_for_camera(m, NULL, c.label);
+            }
+            s_binds.n = 1;
+            s_binds.e[0] = c;
+            nvs_close(h);
+            ESP_LOGW(TAG, "migrated the single binding to a 1-camera list");
+            bind_list_store();
+        } else {
+            nvs_close(h);
+        }
     }
-    nvs_close(h);
+
+    if (s_binds.n == 0) {
+        ESP_LOGW(TAG, "no camera selected -- hold the button 10 s and pick one in setup");
+        return;
+    }
+    for (int i = 0; i < (int)s_binds.n; i++) {
+        ESP_LOGI(TAG, "camera %d: %s model 0x%02X -> %s", i + 1,
+                 s_binds.e[i].label, s_binds.e[i].model,
+                 s_binds.e[i].proto == CAM_PROTO_RSDK ? "R SDK" : "DUML");
+    }
 }
 
-static void bind_save(const uint8_t *addr, uint8_t model, const char *name)
+/* What the camera task calls at start. The work is binds_ready()'s; this is
+ * just the point at which it is guaranteed to have happened before the connect
+ * loop asks how many cameras there are. */
+static void bind_load(void) { binds_ready(); }
+
+static void binds_lock(void)   { if (s_bind_lock) xSemaphoreTake(s_bind_lock, portMAX_DELAY); }
+static void binds_unlock(void) { if (s_bind_lock) xSemaphoreGive(s_bind_lock); }
+
+int duml_cam_bind_count(void)
 {
-    s_proto = proto_for_camera(model, name);
-    nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-    nvs_set_blob(h, NVS_KEY, addr, 6);
-    nvs_set_u8(h, NVS_KEY_MODEL, model);
-    nvs_set_u8(h, NVS_KEY_PROTO, (uint8_t)s_proto);
-    label_for_camera(model, name, s_label);
-    nvs_set_str(h, NVS_KEY_LABEL, s_label);
-    nvs_commit(h);
-    nvs_close(h);
-    s_bound_model = model;
-    ESP_LOGI(TAG, "camera bound, model 0x%02X \"%s\" -> %s", model, s_label,
-             s_proto == CAM_PROTO_RSDK ? "R SDK" : "DUML");
+    binds_ready();
+    binds_lock();
+    int n = (int)s_binds.n;
+    binds_unlock();
+    return n;
+}
+
+bool duml_cam_bind_get(int i, cam_bind_t *out)
+{
+    if (out == NULL) return false;
+    binds_ready();
+    binds_lock();
+    bool ok = (i >= 0 && i < (int)s_binds.n);
+    if (ok) *out = s_binds.e[i];
+    binds_unlock();
+    return ok;
+}
+
+bool duml_cam_bind_add(const uint8_t addr[6], uint8_t model, const char *name)
+{
+    if (addr == NULL) return false;
+    cam_bind_t c = {0};
+    memcpy(c.addr, addr, 6);
+    c.model = model;
+    c.proto = (uint8_t)proto_for_camera(model, name);
+    label_for_camera(model, name, c.label);
+
+    binds_ready();
+    binds_lock();
+    bool ok = cam_bind_add(&s_binds, &c);
+    if (ok) bind_list_store();
+    int n = (int)s_binds.n;
+    binds_unlock();
+
+    if (ok) {
+        ESP_LOGW(TAG, "bound %02X:%02X:%02X:%02X:%02X:%02X \"%s\" -> %s (%d held)",
+                 addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], c.label,
+                 c.proto == CAM_PROTO_RSDK ? "R SDK" : "DUML", n);
+    } else {
+        ESP_LOGW(TAG, "cannot bind: already holding %d cameras", n);
+    }
+    return ok;
+}
+
+bool duml_cam_bind_forget(const uint8_t addr[6])
+{
+    if (addr == NULL) return false;
+    binds_ready();
+    binds_lock();
+    bool ok = cam_bind_remove(&s_binds, addr);
+    if (ok) bind_list_store();
+    binds_unlock();
+    if (ok) ESP_LOGW(TAG, "camera forgotten");
+    return ok;
+}
+
+int duml_cam_bind_reorder(const uint8_t (*order)[6], int n)
+{
+    binds_ready();
+    binds_lock();
+    int placed = cam_bind_reorder(&s_binds, order, n);
+    bind_list_store();
+    binds_unlock();
+    ESP_LOGW(TAG, "priority reordered (%d placed)", placed);
+    return placed;
 }
 
 bool duml_cam_bound_addr(uint8_t out[6])
 {
-    nvs_handle_t h;
     if (out == NULL) return false;
-    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
-    size_t len = 6;
-    bool ok = (nvs_get_blob(h, NVS_KEY, out, &len) == ESP_OK && len == 6);
-    nvs_close(h);
+    binds_ready();
+    binds_lock();
+    bool ok = s_binds.n > 0;
+    if (ok) memcpy(out, s_binds.e[0].addr, 6);
+    binds_unlock();
     return ok;
 }
 
-void duml_cam_set_binding(const uint8_t addr[6], uint8_t model, const char *name)
+bool duml_cam_is_bound(const uint8_t addr[6])
 {
-    if (addr == NULL) return;
-    bind_save(addr, model, name);
-    ESP_LOGW(TAG, "bound by user to %02X:%02X:%02X:%02X:%02X:%02X",
-             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+    if (addr == NULL) return false;
+    binds_ready();
+    binds_lock();
+    bool ok = cam_bind_find(&s_binds, addr) >= 0;
+    binds_unlock();
+    return ok;
 }
 
 void duml_cam_forget_binding(void)
 {
-    nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-    nvs_erase_key(h, NVS_KEY);
-    nvs_commit(h);
-    nvs_close(h);
-    ESP_LOGW(TAG, "binding erased");
+    binds_ready();
+    binds_lock();
+    memset(&s_binds, 0, sizeof(s_binds));
+    bind_list_store();
+    binds_unlock();
+    ESP_LOGW(TAG, "every binding erased");
 }
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
@@ -502,12 +658,15 @@ static void cam_task(void *arg)
     bind_load();
 
     for (;;) {
+        int nbind = duml_cam_bind_count();
+
         /* No camera chosen: connect to nothing at all.
          *
          * There is deliberately no fallback here. A module that has never been
          * set up should sit quietly with a dark LED until someone picks a
          * camera in config mode -- not reach out and claim the nearest one. */
-        if (!ble_has_bound_addr()) {
+        if (nbind == 0) {
+            ble_set_bound_list(NULL, 0);
             if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
                 s_st.link_up = false;
                 xSemaphoreGive(s_lock);
@@ -521,11 +680,70 @@ static void cam_task(void *arg)
                 s_st.link_up = false;
                 xSemaphoreGive(s_lock);
             }
+
+            /* Hand the whole list to the scanner and let ONE window decide.
+             *
+             * The scan already sees every camera that is advertising, so
+             * "which of mine is switched on, and which of those do I want" is
+             * answered from a single pass: the lowest-index camera present
+             * wins. Asking about each in turn instead would be slower, and
+             * worse -- a camera that is on but slow to advertise would time
+             * out and hand the link to a lower-priority one that answered
+             * quicker, quietly turning "highest priority that is on" into
+             * "whichever replied first". */
+            uint8_t addrs[CAM_BIND_MAX][6];
+            int n = 0;
+            for (int i = 0; i < nbind && i < CAM_BIND_MAX; i++) {
+                cam_bind_t c;
+                if (duml_cam_bind_get(i, &c)) memcpy(addrs[n++], c.addr, 6);
+            }
+            ble_set_bound_list(addrs, n);
+
             if (connect_logic_ble_connect(false) != 0) {
                 vTaskDelay(pdMS_TO_TICKS(2000));
+                continue;
             }
+
+            /* Adopt whichever one the scan picked. The protocol, the model and
+             * the OSD label all belong to THAT camera, and with several bound
+             * they are not the same for each -- speaking DUML to an Osmo 360
+             * because it happened to be first in the list would connect
+             * perfectly and then ignore every record command. */
+            uint8_t sel[6];
+            cam_bind_t chosen = {0};
+            bool known = false;
+            if (ble_get_selected_addr(sel)) {
+                for (int i = 0; i < nbind; i++) {
+                    cam_bind_t c;
+                    if (duml_cam_bind_get(i, &c) && memcmp(c.addr, sel, 6) == 0) {
+                        chosen = c; known = true;
+                        if (nbind > 1) {
+                            ESP_LOGW(TAG, "connected to camera %d/%d: %s",
+                                     i + 1, nbind, c.label);
+                        }
+                        break;
+                    }
+                }
+            }
+            if (!known) {
+                /* The scanner connected to something that is not in the list,
+                 * which should be impossible -- it only ever accepts addresses
+                 * we gave it. Drop the link rather than guess a protocol. */
+                ESP_LOGE(TAG, "connected to a camera that is not bound -- dropping");
+                connect_logic_ble_disconnect();
+                continue;
+            }
+            s_proto       = (cam_proto_t)chosen.proto;
+            s_bound_model = chosen.model;
+            strlcpy(s_label, chosen.label, sizeof(s_label));
             continue;
         }
+
+        /* Connected. The camera the scan chose owns the link until it goes
+         * away -- a higher-priority camera coming on later does NOT take it
+         * over. Switching would end a recording in progress to satisfy a
+         * preference, and priority is about who gets picked up, not who gets
+         * put down. */
 
         /* Pairing is DUML on every camera: it is what puts the PIN prompt on
          * the screen, and the Osmo 360 answers it even though it refuses every

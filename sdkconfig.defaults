@@ -1,8 +1,10 @@
-# The target, so that a clean checkout can just "idf.py build".
+# The DEFAULT target, so that a clean checkout can just "idf.py build".
 #
 # Without it CMake defaults to esp32 and fails looking for an xtensa compiler,
-# which reads like a broken repository rather than a missing step. The README
-# still says to run "idf.py set-target esp32c3"; this makes forgetting harmless.
+# which reads like a broken repository rather than a missing step. It is only a
+# default: "idf.py set-target esp32s3", or -D IDF_TARGET on the command line,
+# overrides it, and IDF then also reads sdkconfig.defaults.<target> beside this
+# file for whatever that part needs on top.
 CONFIG_IDF_TARGET="esp32c3"
 
 # Bluetooth: BLE 4.2 only, matching the upstream DJI demo. The camera does not
@@ -11,9 +13,11 @@ CONFIG_BT_ENABLED=y
 CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n
 CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
 
-# The Supermini exposes the C3's native USB Serial/JTAG, so the console must go
-# there rather than to UART0. UART1 (GPIO4/5) is left free for the FC link.
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# The console is NOT set here. Where it goes is a property of the part: most
+# targets have a USB Serial/JTAG peripheral and should use it, and the original
+# ESP32 has no USB at all and must fall back to UART0. Setting it in the shared
+# file made the fallback silent on the one part that needs it stated. It lives
+# in sdkconfig.defaults.<target> instead.
 
 # A stalled BLE stack must never take the module down in a way that leaves a
 # clip running; let the watchdog reset us instead.

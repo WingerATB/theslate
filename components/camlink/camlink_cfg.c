@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "camlink_cfg.h"
+#include "board.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
@@ -74,8 +75,17 @@ static void clamp(camlink_cfg_t *c)
     if (c->cfg_hold_ds > CAMLINK_CFG_HOLD_DS_MAX) {
         c->cfg_hold_ds = CAMLINK_CFG_HOLD_DS_DEFAULT;
     }
+    if (c->stop_delay_s > CAMLINK_STOP_DELAY_MAX_S) {
+        /* A corrupt byte here would hold a clip open for minutes after every
+         * landing, so an unreadable value turns the feature OFF rather than
+         * being clamped to the maximum. */
+        c->stop_delay_s = 0;
+    }
+    if (c->warn_batt_pct > 100) {
+        c->warn_batt_pct = 0;    /* impossible threshold -> do not warn */
+    }
     if (c->tx_power >= CFG_TX__COUNT) {
-        c->tx_power = CFG_TX_N24;   /* unknown value -> the quiet, flight-safe one */
+        c->tx_power = CFG_TX_QUIETEST;  /* unknown value -> the quiet, flight-safe one */
     }
     /* A layout that cannot be rendered is replaced whole rather than patched.
      * Patching would leave the user with a layout they never chose and cannot
@@ -119,6 +129,15 @@ void camlink_cfg_init(void)
     s_cfg.range_max      = MAX_THRESHOLD;
     s_cfg.cfg_ver        = CAMLINK_CFG_VER;
     s_cfg.cfg_hold_ds    = CAMLINK_CFG_HOLD_DS_DEFAULT;
+    /* Post-roll is OFF until asked for. It changes what the camera does
+     * after every landing, and a firmware update is not the place to start
+     * doing that on somebody's behalf. */
+    s_cfg.stop_delay_s   = 0;
+    /* The warnings ARE on by default, because a warning nobody enabled is a
+     * warning nobody gets, and these are the ones the product exists for. The
+     * thresholds are only where they start. */
+    s_cfg.warn_batt_pct  = 20;
+    s_cfg.warn_card_min  = 5;
     memcpy(s_cfg.osd, k_default_osd, sizeof(k_default_osd));
 #if   defined(CONFIG_CAMLINK_TX_N12)
     s_cfg.tx_power       = CFG_TX_N12;
@@ -173,7 +192,7 @@ void camlink_cfg_init(void)
     ESP_LOGI(TAG, "mode=%s AUX%d (idx %u) range %u-%u tx=%s",
              camlink_cfg_mode_name(s_cfg.mode),
              cfg_index_to_aux(s_cfg.switch_channel), s_cfg.switch_channel,
-             s_cfg.range_min, s_cfg.range_max, camlink_cfg_tx_name(s_cfg.tx_power));
+             s_cfg.range_min, s_cfg.range_max, board_tx_name(s_cfg.tx_power));
 }
 
 void camlink_cfg_get(camlink_cfg_t *out)
@@ -200,7 +219,7 @@ static bool commit(void)
     ESP_LOGI(TAG, "mode=%s AUX%d (idx %u) range %u-%u tx=%s",
              camlink_cfg_mode_name(s_cfg.mode),
              cfg_index_to_aux(s_cfg.switch_channel), s_cfg.switch_channel,
-             s_cfg.range_min, s_cfg.range_max, camlink_cfg_tx_name(s_cfg.tx_power));
+             s_cfg.range_min, s_cfg.range_max, board_tx_name(s_cfg.tx_power));
     return true;
 }
 
@@ -305,15 +324,28 @@ bool camlink_cfg_set_tx_power(uint8_t tx)
     return ok;
 }
 
-const char *camlink_cfg_tx_name(uint8_t tx)
+bool camlink_cfg_set_stop_delay(uint8_t sec)
 {
-    switch (tx) {
-    case CFG_TX_N24: return "-24 dBm";
-    case CFG_TX_N12: return "-12 dBm";
-    case CFG_TX_N0:  return "0 dBm";
-    case CFG_TX_P3:  return "+3 dBm";
-    default:         return "?";
-    }
+    if (sec > CAMLINK_STOP_DELAY_MAX_S) return false;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_cfg.stop_delay_s = sec;
+    bool ok = commit();
+    if (s_lock) xSemaphoreGive(s_lock);
+    return ok;
+}
+
+/* Both thresholds together: they are edited on the same screen and neither is
+ * meaningful without the other being left alone, so a rejected battery figure
+ * must not land a card figure on its own. */
+bool camlink_cfg_set_warn(uint8_t batt_pct, uint8_t card_min)
+{
+    if (batt_pct > 100) return false;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_cfg.warn_batt_pct = batt_pct;
+    s_cfg.warn_card_min = card_min;
+    bool ok = commit();
+    if (s_lock) xSemaphoreGive(s_lock);
+    return ok;
 }
 
 const char *camlink_cfg_switch_kind_name(uint8_t kind)

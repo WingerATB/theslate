@@ -1,0 +1,19 @@
+# ESP32 (original, Xtensa LX6).
+#
+# Three real consequences, and none of them are cosmetic.
+#
+# NO USB. There is no USB Serial/JTAG peripheral, so the console goes to UART0
+# and the board needs a USB-UART bridge for the first flash. Stated here rather
+# than left to the silent fallback it used to get. UART0 is GPIO1/3, so keep
+# the MSP pins off those.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# IRAM. A stock build overflows iram0_0_seg by about 1.6 KB. Both options below
+# move Wi-Fi code out of IRAM, which costs throughput -- and throughput is not
+# something this firmware has: the access point serves one phone one small page,
+# and only while the module is sitting on a bench.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+
+# The third consequence is not a setting: its transmit floor is -12 dBm, and
+# only three rungs of the ladder exist. See board.c.

@@ -131,6 +131,15 @@ typedef enum {
     CFG_TX__COUNT
 } cfg_tx_t;
 
+/* Rung 0, by what it MEANS rather than by what it measures on one part.
+ *
+ * The stored names date from a firmware that only ran on a C3, where rung 0 is
+ * -24 dBm. It is -15 dBm on a C6 and -12 dBm on the original ESP32 -- the
+ * names cannot change, because the numbers behind them are in every shipped
+ * module's NVS, but code that means "as quiet as this radio goes" should not
+ * have to say "N24" to ask for it. board.h owns what each rung is worth. */
+#define CFG_TX_QUIETEST  CFG_TX_N24
+
 /* Persisted in NVS. Fields may only ever be APPENDED: the loader copies a
  * short stored blob over the defaults and leaves the rest at their default
  * values, which is what makes a firmware update that adds a setting keep the
@@ -159,6 +168,16 @@ typedef struct {
     uint8_t  cfg_hold_ds;       /* how long a SWITCH must be held, in tenths
                                  * of a second, 0..100. Ignored by a BUTTON,
                                  * which has no position to hold.            */
+    /* Appended together. A blob written before they existed keeps the
+     * defaults below, which is what makes the update that adds them change
+     * nothing about how somebody's quad already behaves. */
+    uint8_t  stop_delay_s;      /* keep recording this long after an
+                                 * automatic stop. 0 = off, and off is the
+                                 * default -- see the note above.           */
+    uint8_t  warn_batt_pct;     /* warn at or below this camera battery %.
+                                 * 0 = never warn about the battery.        */
+    uint8_t  warn_card_min;     /* warn at or below this many minutes of
+                                 * card time. 0 = never warn about the card.*/
 } camlink_cfg_t;
 
 /* --------------------------------------------------------------------------
@@ -325,6 +344,123 @@ static inline bool camlink_ovr_update(camlink_ovr_t *o, const camlink_ovr_in_t *
     return o->active ? o->want : in->auto_want;
 }
 
+/* --------------------------------------------------------------------------
+ * Post-roll
+ *
+ * Keep recording for a few seconds after the AUTOMATIC stop, so the footage
+ * does not end before it shows where the aircraft went. A crash disarms, and a
+ * disarm is what closes the clip; the seconds you actually want are the ones
+ * after that.
+ *
+ * Named the way broadcast names it. Post-roll is the padding at the tail of a
+ * recording, and its opposite -- pre-roll, the seconds captured BEFORE the
+ * trigger -- is the other half of the same idea, and one the camera itself can
+ * do (DJI calls it pre-recording, GoPro calls it HindSight). Naming this one
+ * properly leaves that one an obvious name when it arrives.
+ *
+ * Pure and here rather than inside the logic task, for the same reason as
+ * camlink_ovr_update() below it: the host tests exercise the shipped code.
+ *
+ * FOUR RULES MAKE IT SAFE, and every one of them is a way of NOT weakening a
+ * guarantee that already exists:
+ *
+ *   1. Only the automatic source's stop is delayed. A press of the button or
+ *      the record switch is a deliberate act and takes effect at once -- the
+ *      person pressing stop is looking at the aircraft.
+ *
+ *   2. The automatic source wanting to record again cancels it. Re-arming does
+ *      not restart a clip, it simply continues the one that never stopped.
+ *
+ *   3. Losing authority or the camera cancels it immediately. The existing
+ *      rule is that a dead UART closes an open clip. A delay that outlived a
+ *      dead UART would quietly repeal that rule, which is exactly the class of
+ *      thing camlink_ovr_update()'s asymmetry exists to prevent: a hold on
+ *      RECORD needs a live authority and a camera to hear it.
+ *
+ *   4. Zero seconds means off, and off is the default. A module updating to a
+ *      firmware that gained this setting must not start behaving differently
+ *      from the one its owner flew last week.
+ *
+ * CUT mode is untouched: a cut is a stop followed immediately by a start,
+ * issued directly rather than through the intent, so there is no automatic
+ * stop edge here to delay. Delaying one would turn a cut into a pause.
+ * -------------------------------------------------------------------------- */
+#define CAMLINK_STOP_DELAY_MAX_S  30
+
+typedef struct {
+    bool     active;
+    uint32_t until_ms;
+} camlink_stopdelay_t;
+
+typedef struct {
+    bool     auto_stop;       /* the automatic source went record -> stop now */
+    bool     want;            /* the effective intent for this tick           */
+    bool     overridden;      /* a manual override is in force -- hands off   */
+    bool     authority;       /* an automatic source is live, or none expected*/
+    bool     cam_connected;
+    uint8_t  delay_s;         /* the setting; 0 disables the whole thing      */
+    uint32_t now_ms;
+} camlink_stopdelay_in_t;
+
+/* Fold one tick in and return the effective intent.
+ *
+ * `remain_s`, when not NULL, is the countdown for the OSD -- 0 when nothing is
+ * being held. Showing it is not decoration: a camera that keeps recording for
+ * five seconds after landing, with nothing on screen saying why, is
+ * indistinguishable from a stop command that failed.
+ */
+static inline bool camlink_stopdelay_update(camlink_stopdelay_t *st,
+                                            const camlink_stopdelay_in_t *in,
+                                            uint8_t *remain_s)
+{
+    if (remain_s) *remain_s = 0;
+
+    /* Off, or hands off. Any latched hold is dropped rather than left to
+     * expire, so turning the setting to zero takes effect at once. */
+    if (in->delay_s == 0 || in->overridden) {
+        st->active = false;
+        return in->want;
+    }
+
+    /* Rule 2, and it comes first: a source that wants to record again ends the
+     * hold whether or not one was running. Checked before the start edge so a
+     * tick that is both cannot leave a hold armed behind a live recording. */
+    if (in->want) {
+        st->active = false;
+        return true;
+    }
+
+    /* Rule 3. Demoted the moment the thing that would have to hear a stop is
+     * gone -- the same asymmetry as the manual override: holding IDLE past a
+     * failure is harmless, holding RECORD past one is not. */
+    if (!in->authority || !in->cam_connected) {
+        st->active = false;
+        return false;
+    }
+
+    if (in->auto_stop && !st->active) {
+        st->active   = true;
+        st->until_ms = in->now_ms + (uint32_t)in->delay_s * 1000u;
+    }
+
+    if (!st->active) return false;
+
+    /* Unsigned subtraction, so this stays correct across the 32-bit
+     * millisecond wrap rather than holding the clip open for 49 days. */
+    if ((int32_t)(in->now_ms - st->until_ms) >= 0) {
+        st->active = false;
+        return false;
+    }
+
+    if (remain_s) {
+        uint32_t left = st->until_ms - in->now_ms;
+        /* Round up: a countdown that shows 0 while still recording is the
+         * confusion this display exists to remove. */
+        *remain_s = (uint8_t)((left + 999u) / 1000u);
+    }
+    return true;
+}
+
 /* Betaflight numbers AUX channels from 1, after the four sticks. Users think
  * in AUX numbers; MSP_RC speaks raw indices. Convert at the edges only. */
 static inline uint8_t cfg_aux_to_index(uint8_t aux) { return (uint8_t)(aux + 3); }
@@ -348,6 +484,8 @@ bool camlink_cfg_set_tx_auto(uint8_t on);
 bool camlink_cfg_set_config_channel(uint8_t ch);
 bool camlink_cfg_set_config_kind(uint8_t kind);
 bool camlink_cfg_set_config_hold(uint8_t ds);
+bool camlink_cfg_set_stop_delay(uint8_t s);
+bool camlink_cfg_set_warn(uint8_t batt_pct, uint8_t card_min);
 
 /* Replace the whole OSD layout. Rejected as a unit if any row would not fit in
  * OSD_ROW_MAX characters -- a row that overflows loses its last field silently
@@ -361,6 +499,9 @@ void camlink_cfg_default_osd(uint8_t out[OSD_ROWS][OSD_ROW_FIELDS]);
 
 const char *camlink_cfg_mode_name(uint8_t mode);
 const char *camlink_cfg_switch_kind_name(uint8_t kind);
-const char *camlink_cfg_tx_name(uint8_t tx);
+/* There is deliberately no camlink_cfg_tx_name(). It used to live here with the
+ * C3's four figures written into it, which made it a second source of truth
+ * that was wrong on any part with a different ladder -- a C6 logging "-24 dBm"
+ * for a radio at -15 dBm. board_tx_name() in board.h is the only one. */
 
 #endif

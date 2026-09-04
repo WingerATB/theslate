@@ -36,6 +36,11 @@ const osd_field_info_t osd_fields[OSD_F__COUNT] = {
     [OSD_F_CARD_SHORT] = { "Card",       "1H49",      5 },  /* "99H59" */
     [OSD_F_DOT]        = { "Alive dot",  ".",         1 },
     [OSD_F_CAMERA]     = { "Camera",     "O360",      4 },
+    /* The same 7 characters the state field books, because it holds the same
+     * words. Blank whenever nothing is wrong, which is most of the time -- and
+     * that is the point of giving it a row: the warning appears where the eye
+     * is not already reading, the way a flight controller's own warnings do. */
+    [OSD_F_WARN]       = { "Warning",    "NOT REC",   7 },
 };
 
 int osd_row_width(const uint8_t row[OSD_ROW_FIELDS])
@@ -82,6 +87,7 @@ static const char *setup_word(camlink_setup_hint_t h)
 
 static int render_field(uint8_t f, const cam_status_t *cam, bool heartbeat,
                         bool cam_gone, camlink_setup_hint_t setup,
+                        const camlink_osd_extra_t *extra,
                         char *buf, size_t cap)
 {
     buf[0] = '\0';
@@ -95,12 +101,34 @@ static int render_field(uint8_t f, const cam_status_t *cam, bool heartbeat,
     if (f == OSD_F_STATE) {
         const char *w = setup_word(setup);
         if (w) { snprintf(buf, cap, "%s", w); return 1; }
+
+        /* A warning takes the state slot ONLY when the layout has given it no
+         * field of its own -- see the note in camlink_format_osd(). On its ON
+         * phase only, and below the setup gesture, which is about to change
+         * what the module IS. */
+        if (extra && extra->warn_in_state &&
+            extra->warn != CAM_WARN_NONE && extra->warn_on) {
+            const char *ww = camlink_warn_word(extra->warn);
+            if (ww) { snprintf(buf, cap, "%s", ww); return 1; }
+        }
     }
 
     if (f == OSD_F_DOT) {
         buf[0] = heartbeat ? '.' : ' ';
         buf[1] = '\0';
         return 1;
+    }
+
+    /* The warning, in a field of its own.
+     *
+     * Given a home here it stops borrowing the state slot -- see the note in
+     * camlink_format_osd(). Blank when nothing is wrong, and blank on the off
+     * phase of the blink, so the row is empty space until it is not. */
+    if (f == OSD_F_WARN) {
+        const char *ww = (extra && extra->warn != CAM_WARN_NONE && extra->warn_on)
+                       ? camlink_warn_word(extra->warn) : NULL;
+        if (ww) snprintf(buf, cap, "%s", ww);
+        return 1;   /* rendered either way -- an absent warning is 7 spaces */
     }
 
     /* Nothing is shown for a camera that is not talking, except that it is not
@@ -128,10 +156,14 @@ static int render_field(uint8_t f, const cam_status_t *cam, bool heartbeat,
 
     switch (f) {
     case OSD_F_STATE:
-        if (cam->temp_over_valid && cam->temp_over >= 2) {
-            /* 2 = too hot to record, 3 = about to shut down. Worth saying: it
-             * explains why recording silently is not happening. */
-            snprintf(buf, cap, "CAM HOT");
+        /* Overheating used to be tested right here. It is a warning like any
+         * other now and lives in the ladder, so there is one list of things
+         * that can pre-empt the state rather than one list plus a special
+         * case that outranked it by accident of being written first. */
+        if (extra && extra->stop_delay_s) {
+            /* Counting down after an automatic stop. Deliberately still says
+             * REC, because it still is. */
+            snprintf(buf, cap, "REC %u", (unsigned)extra->stop_delay_s);
         } else {
             snprintf(buf, cap, "%s", cam->recording ? "REC" : "IDLE");
         }
@@ -177,6 +209,7 @@ void camlink_format_osd(const cam_status_t *cam, bool msp_link_up,
                         bool want_recording, uint32_t clip_elapsed_s,
                         bool heartbeat, const uint8_t layout[OSD_ROWS][OSD_ROW_FIELDS],
                         camlink_setup_hint_t setup,
+                        const camlink_osd_extra_t *extra,
                         char out[4][17])
 {
     (void)msp_link_up;
@@ -184,6 +217,27 @@ void camlink_format_osd(const cam_status_t *cam, bool msp_link_up,
     (void)want_recording;
 
     if (layout == NULL) layout = default_layout;
+
+    /* Does the layout have a Warning field anywhere?
+     *
+     * If it does, warnings go there and the state field is left alone to say
+     * REC or IDLE. If it does not, the state field carries them, which is what
+     * it did before the field existed -- so a module updating to this firmware
+     * keeps its warnings rather than silently losing them until somebody opens
+     * the settings page.
+     *
+     * One rule, and it reads as: a warning needs somewhere to go, and borrows
+     * the state slot only while you have not given it a row of its own. */
+    bool has_warn_field = false;
+    for (int r = 0; r < OSD_ROWS && !has_warn_field; r++) {
+        for (int i = 0; i < OSD_ROW_FIELDS; i++) {
+            if (layout[r][i] == OSD_F_WARN) { has_warn_field = true; break; }
+        }
+    }
+    camlink_osd_extra_t local = {0};
+    if (extra) local = *extra;
+    local.warn_in_state = !has_warn_field;
+    extra = &local;
 
     /* A camera that has gone silent counts as gone, not merely unconfirmed.
      * The status goes stale on its own clock, well before BLE admits the link
@@ -203,7 +257,8 @@ void camlink_format_osd(const cam_status_t *cam, bool msp_link_up,
             if (f == OSD_F_NONE || f >= OSD_F__COUNT) continue;
 
             char part[OSD_ROW_MAX + 1];
-            if (!render_field(f, cam, heartbeat, cam_gone, setup, part, sizeof(part))) {
+            if (!render_field(f, cam, heartbeat, cam_gone, setup, extra,
+                              part, sizeof(part))) {
                 /* Unconfirmed: the field contributes nothing but still holds
                  * its place in the row's width, so the fields after it do not
                  * shuffle sideways every time a reading comes and goes. */

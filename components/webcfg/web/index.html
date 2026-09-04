@@ -119,6 +119,18 @@ input[type=range]{width:100%;accent-color:var(--ink)}
 .cam .info{flex:1;min-width:0}
 .cam .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cam .sub{color:var(--ink-2);font-size:12px;font-variant-numeric:tabular-nums}
+/* A known camera is the same card as a discovered one, so the two lists read
+   as one thing -- the module's cameras above, everything else it can see
+   below. What differs is the priority number and the drag handle. */
+.cam.known{background:var(--surface);border-color:var(--line-2);
+  touch-action:none;user-select:none;-webkit-user-select:none}
+.cam.known.drag{opacity:.4}
+.cam.known.over{border-color:var(--ink)}
+.cam .grip{color:var(--ink-2);font-size:15px;line-height:1;cursor:grab;
+  padding:2px 2px 2px 0}
+.cam .pri{min-width:22px;height:22px;border-radius:999px;background:var(--ink);
+  color:var(--on-ink);font-size:12px;font-weight:600;display:flex;
+  align-items:center;justify-content:center;font-variant-numeric:tabular-nums}
 .bars{display:flex;align-items:flex-end;gap:2px;height:16px}
 .bars i{width:3px;background:var(--line-2);border-radius:1px}
 .bars i.on{background:var(--ink)}
@@ -132,6 +144,15 @@ footer button{flex:1}
   background:var(--ink);color:var(--on-ink);border-radius:9px;
   padding:9px 16px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
 #toast.show{opacity:1}
+
+#sheet{position:fixed;inset:0;background:#14171c66;display:flex;
+  align-items:center;justify-content:center;padding:24px;z-index:50}
+#sheet.hide{display:none}
+.sheetCard{background:var(--bg);border:1px solid var(--line);border-radius:14px;
+  padding:20px;max-width:360px;width:100%}
+.sheetTitle{font-weight:600;margin-bottom:8px}
+.sheetRow{display:flex;gap:10px;margin-top:18px}
+.sheetRow button{flex:1}
 </style>
 </head>
 <body>
@@ -143,14 +164,20 @@ footer button{flex:1}
 </header>
 
 <section>
-  <h2>Camera</h2>
+  <h2>Cameras</h2>
+
+  <div id="knownWrap" class="hide">
+    <div id="knownList"></div>
+    <div class="note" id="knownNote"></div>
+  </div>
+
+  <div style="font-weight:600;margin:20px 0 8px" id="findHead">Nearby</div>
   <div id="camList"><div class="note" id="camEmpty">Looking for cameras…</div></div>
   <div class="row" style="margin-top:12px">
     <span class="meta" id="camBound">No camera selected</span>
-    <button class="ghost" id="forget">Forget</button>
   </div>
-  <div class="note">Switch your camera on and it appears here. Pick yours — the
-    module connects to that one and nothing else.</div>
+  <div class="note">Switch your camera on and it appears here. Pick yours and it
+    moves up into your list.</div>
 
   <div id="linkFault" class="hide" style="margin-top:14px;border:1px solid var(--warn);
     border-radius:11px;padding:14px 16px">
@@ -212,12 +239,52 @@ footer button{flex:1}
 </section>
 
 <section>
+  <h2>Safety</h2>
+
+  <label class="row" style="cursor:default">
+    <span style="font-weight:600">Post-roll</span>
+    <span id="sdV" class="mono"></span>
+  </label>
+  <input type="range" id="stopdelay" min="0" max="30" step="1">
+  <div class="note">When the flight controller stops the recording — you disarm,
+    or you crash — the camera carries on for this long before it actually stops.
+    A crash disarms the quad, and the seconds you want are the ones
+    <em>after</em> that: where it went, and what it landed on.
+    <b>Arming again during the countdown just carries on recording</b>, so it
+    costs you nothing on a normal landing. The OSD counts down so you can see it
+    happening rather than wondering why the camera is still running.
+    <br><br>Pressing the button or your record switch stops immediately — this
+    only ever delays the automatic stop, never you.</div>
+
+  <h2 style="margin-top:28px">Warnings</h2>
+  <div class="note" style="margin-bottom:14px">The state field flashes a warning
+    instead of REC or IDLE when something is wrong, and the module's LED blinks
+    fast when it has been asked to record and is not. The most important one
+    wins: <b>NO SD</b>, then <b>CAM HOT</b>, then <b>NOT REC</b>, then the two
+    below.</div>
+
+  <label class="row" style="cursor:default">
+    <span style="font-weight:600">Warn below camera battery</span>
+    <span id="wbV" class="mono"></span>
+  </label>
+  <input type="range" id="warnbatt" min="0" max="100" step="5">
+
+  <label class="row" style="margin-top:16px;cursor:default">
+    <span style="font-weight:600">Warn below card time left</span>
+    <span id="wcV" class="mono"></span>
+  </label>
+  <input type="range" id="warncard" min="0" max="60" step="1">
+  <div class="note">Either at zero switches that warning off. <b>NOT REC</b> is
+    not a threshold and cannot be switched off — it is the reason this module
+    exists.</div>
+</section>
+
+<section>
   <h2>Radio power</h2>
-  <div class="seg">
-    <label><input type="radio" name="tx" value="0">Low</label>
-    <label><input type="radio" name="tx" value="1">Medium</label>
-    <label><input type="radio" name="tx" value="2">High</label>
-    <label><input type="radio" name="tx" value="3">Max</label>
+  <div class="seg" data-tx>
+    <!-- Filled from /api/state. How many rungs there are, and what each is
+         worth in dBm, is a property of the chip -- see the tx note in
+         webcfg.c. -->
   </div>
   <div class="desc" id="txDesc"></div>
   <div class="note" id="txWarn"></div>
@@ -336,6 +403,21 @@ footer button{flex:1}
 </div></footer>
 <div id="toast"></div>
 
+<!-- Confirm sheet. Forgetting a camera is not undoable from here -- the camera
+     has to be in range to be picked again -- so it asks, rather than relying on
+     the two-tap arming used for buttons that sit still. A card in a list moves
+     under the finger as the list reorders. -->
+<div id="sheet" class="hide">
+  <div class="sheetCard">
+    <div class="sheetTitle" id="sheetTitle"></div>
+    <div class="note" id="sheetBody" style="margin-top:0"></div>
+    <div class="sheetRow">
+      <button class="ghost" id="sheetNo">Keep it</button>
+      <button id="sheetYes">Forget</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = s => document.querySelector(s);
 const AUX_MAX = 14;
@@ -441,13 +523,32 @@ const CFG_KIND_DESC = {
        'the check that you are disarmed.',
 };
 
-const TX_DESC = {
-  '0': '<b>−24 dBm.</b> Correct once the camera is mounted on the quad, ' +
-       'centimetres away. Quietest next to your receiver.',
-  '1': '<b>−12 dBm.</b> Camera on the same desk.',
-  '2': '<b>0 dBm.</b> Camera across the room.',
-  '3': '<b>+3 dBm.</b> Maximum reach, for bench work only.',
-};
+// What each rung is FOR. The dBm figure beside it is not written here: it
+// comes from the firmware in state.tx, because the ladder is a property of the
+// chip. A C3 goes down to −24 dBm, a C6's radio stops at −15 dBm, and an
+// original ESP32 has only three rungs at all. A page that hard-coded the
+// numbers would state a power the radio is not running at.
+const TX_ROLE = [
+  'Correct once the camera is mounted on the quad, centimetres away. ' +
+  'Quietest next to your receiver.',
+  'Camera on the same desk.',
+  'Camera across the room.',
+  'Maximum reach, for bench work only.',
+];
+const TX_LABEL = ['Low', 'Medium', 'High', 'Max'];
+
+// The quietest rung is always index 0, whatever it measures, so "Low" and the
+// automatic drop on arming always mean "as quiet as this radio goes".
+let txNames = [];
+
+function buildTx(names) {
+  txNames = names || [];
+  const seg = document.querySelector('.seg[data-tx]');
+  if (!seg) return;
+  seg.innerHTML = txNames.map((_, i) =>
+    `<label><input type="radio" name="tx" value="${i}">${TX_LABEL[i] || ('Level ' + i)}</label>`
+  ).join('');
+}
 
 // Mirrors camlink_cfg_in_window() in camlink_cfg.h. A limit dragged to the end
 // of its travel means "and beyond": a receiver at +100% is not obliged to stop
@@ -486,9 +587,22 @@ function paint() {
   const hd = +$('#cfghold').value;
   $('#cfgHoldV').textContent = hd === 0 ? 'instantly' : (hd / 10).toFixed(1) + ' s';
 
+  const sd = +$('#stopdelay').value;
+  $('#sdV').textContent = sd === 0 ? 'off' : sd + ' s';
+  const wb = +$('#warnbatt').value;
+  $('#wbV').textContent = wb === 0 ? 'off' : wb + '%';
+  const wc = +$('#warncard').value;
+  $('#wcV').textContent = wc === 0 ? 'off' : wc + ' min';
+
   const tx = $('input[name=tx]:checked')?.value;
-  $('#txDesc').innerHTML = TX_DESC[tx] || '';
-  $('#txWarn').textContent = (!$('#txauto').checked && (tx === '3' || tx === '2'))
+  const ti = +tx;
+  $('#txDesc').innerHTML = (txNames[ti] ? '<b>' + txNames[ti] + '.</b> ' : '') +
+                           (TX_ROLE[ti] || '');
+  // Anything above the quietest two rungs is a bench setting. Expressed as a
+  // distance from the top of THIS chip's ladder rather than as "2 or 3", which
+  // was only right on a four-rung part.
+  $('#txWarn').textContent = (!$('#txauto').checked && txNames.length &&
+                              ti >= txNames.length - 2)
     ? 'Set this back to Low before flying, or switch on the option below.' : '';
 }
 
@@ -513,6 +627,7 @@ document.addEventListener('change', e => {
   if (t.name === 'mode' || t.name === 'tx' || t.name === 'kind' ||
       t.id === 'aux' || t.id === 'min' || t.id === 'max' ||
       t.id === 'txauto' || t.id === 'cfgaux' || t.id === 'cfghold' ||
+      t.id === 'stopdelay' || t.id === 'warnbatt' || t.id === 'warncard' ||
       t.name === 'cfgkind') setDirty(true);
 });
 ['min', 'max', 'cfghold'].forEach(id =>
@@ -537,12 +652,24 @@ function fill(s) {
   $('#meta').textContent = s.ssid + ' · ' + s.fw;
   $('#fwVer').textContent = s.fw;
   document.querySelector(`input[name=mode][value="${s.cfg.mode}"]`).checked = true;
-  document.querySelector(`input[name=tx][value="${s.cfg.tx}"]`).checked = true;
+  buildTx(s.tx);
+  // A stored rung past the end of this chip's ladder cannot be shown as
+  // chosen, so fall back to the quietest -- which is what the firmware itself
+  // clamps to.
+  const txSel = document.querySelector(`input[name=tx][value="${s.cfg.tx}"]`) ||
+                document.querySelector('input[name=tx][value="0"]');
+  if (txSel) txSel.checked = true;
   document.querySelector(`input[name=kind][value="${s.cfg.kind}"]`).checked = true;
   $('#txauto').checked = !!s.cfg.txauto;
   $('#cfgaux').value = s.cfg.cfgaux || 0;
   document.querySelector(`input[name=cfgkind][value="${s.cfg.cfgkind}"]`).checked = true;
   $('#cfghold').value = s.cfg.cfghold;
+  /* The firmware caps the delay; the slider takes its ceiling from there so
+     the two cannot disagree about what is accepted. */
+  if (s.cfg.stopmax) $('#stopdelay').max = s.cfg.stopmax;
+  $('#stopdelay').value = s.cfg.stopdelay;
+  $('#warnbatt').value  = s.cfg.warnbatt;
+  $('#warncard').value  = s.cfg.warncard;
   $('#aux').value = Math.min(Math.max(s.cfg.aux, 1), AUX_MAX);
   $('#min').value = s.cfg.min;
   $('#max').value = s.cfg.max;
@@ -550,9 +677,10 @@ function fill(s) {
 }
 
 function live(s) {
-  $('#camBound').textContent = s.cam.bound ? 'Selected: ' + s.cam.mac
-                                           : 'No camera selected';
-  $('#forget').disabled      = !s.cam.bound;
+  renderKnown(s.known, s.bindmax);
+  $('#camBound').textContent = known.length
+      ? known.length + (known.length === 1 ? ' camera saved' : ' cameras saved')
+      : 'No camera selected';
 
   // Why the link is down, in the words of someone holding a quad. Shown only
   // when there is something to say: a module that has never had a failure
@@ -617,6 +745,164 @@ function bars(rssi) {
   return h + '</span>';
 }
 
+// ---- Known cameras --------------------------------------------------------
+//
+// The module holds a list of cameras in priority order and connects to the
+// highest-priority one that is actually switched on. Drag to reorder; the
+// number on the right is the priority, top is 1.
+//
+// The cards are the same element as the discovery list below, deliberately:
+// the two lists are one idea -- the cameras this module has, and the cameras
+// it can currently see -- and giving them different shapes would suggest they
+// are different kinds of thing.
+let known = [], bindMax = 4, knownDirty = false;
+
+function renderKnown(list, max) {
+  known = list || [];
+  bindMax = max || bindMax;
+  const wrap = $('#knownWrap'), box = $('#knownList');
+
+  wrap.classList.toggle('hide', known.length === 0);
+  $('#findHead').textContent = known.length ? 'Add another' : 'Nearby';
+  if (!known.length) return;
+
+  // Same reasoning as the discovery list: rebuild only when the CONTENT
+  // changes, never on a poll, or a card can be replaced underneath a finger
+  // that is halfway through dragging it.
+  const key = known.map(c => c.id).join('|');
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+
+  box.innerHTML = known.map((c, i) => `
+    <div class="cam known" data-id="${c.id}">
+      <div class="grip">⠿</div>
+      <div class="info">
+        <div class="nm">${c.label || 'Camera'}</div>
+        <div class="sub">${c.model || 'DJI camera'} · ${c.mac}</div>
+      </div>
+      <div class="pri">${i + 1}</div>
+    </div>`).join('');
+
+  $('#knownNote').innerHTML = known.length === 1
+    ? 'The module connects to this camera and nothing else. ' +
+      'Add another below and it will use whichever is switched on.'
+    : '<b>Drag to reorder.</b> On power-up the module looks once, sees which ' +
+      'of these are switched on, and takes the highest of them — so put the ' +
+      'camera you fly most at the top. It never swaps mid-flight: once ' +
+      'connected, that camera keeps the link until it goes away.' +
+      (known.length >= bindMax
+        ? ' <b>This is the most it can hold</b> — forget one to add another.'
+        : '');
+
+  box.querySelectorAll('.cam').forEach(el => attachDrag(el));
+}
+
+// Drag with pointer events so one code path serves mouse and touch. The cards
+// carry touch-action:none, or the browser scrolls the page instead of letting
+// us have the move events.
+function attachDrag(el) {
+  let startY = 0, moved = false, from = -1;
+
+  el.addEventListener('pointerdown', e => {
+    if (e.button !== undefined && e.button !== 0) return;
+    startY = e.clientY;
+    moved = false;
+    from = [...$('#knownList').children].indexOf(el);
+    el.setPointerCapture(e.pointerId);
+  });
+
+  el.addEventListener('pointermove', e => {
+    if (from < 0) return;
+    // A few pixels of slop, so a tap with a shaky thumb stays a tap.
+    if (!moved && Math.abs(e.clientY - startY) < 8) return;
+    moved = true;
+    el.classList.add('drag');
+
+    const box = $('#knownList');
+    const kids = [...box.children];
+    const over = kids.find(k => {
+      if (k === el) return false;
+      const r = k.getBoundingClientRect();
+      return e.clientY >= r.top && e.clientY <= r.bottom;
+    });
+    if (!over) return;
+    const to = kids.indexOf(over);
+    box.insertBefore(el, to > kids.indexOf(el) ? over.nextSibling : over);
+    renumber();
+  });
+
+  const end = () => {
+    el.classList.remove('drag');
+    if (from < 0) return;
+    const wasDrag = moved;
+    from = -1; moved = false;
+    if (wasDrag) saveOrder();
+    else forgetSheet(el.dataset.id);
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+}
+
+// The numbers are drawn from position, not stored, so they cannot disagree
+// with the order the list is actually in.
+function renumber() {
+  [...$('#knownList').children].forEach((el, i) => {
+    el.querySelector('.pri').textContent = i + 1;
+  });
+}
+
+async function saveOrder() {
+  const ids = [...$('#knownList').children].map(el => el.dataset.id);
+  // Reorder the local copy too, so the next poll's content key matches and the
+  // list is not rebuilt out from under the user.
+  known = ids.map(id => known.find(c => c.id === id)).filter(Boolean);
+  $('#knownList').dataset.key = ids.join('|');
+  try {
+    const r = await fetch('/api/order', {
+      method: 'POST', body: new URLSearchParams({order: ids.join(',')}),
+    });
+    toast(r.ok ? 'Priority saved' : 'Could not save the order');
+  } catch (e) { toast('Could not save the order'); }
+}
+
+// ---- the confirm sheet ----------------------------------------------------
+let sheetAction = null;
+
+function showSheet(title, body, yes, onYes) {
+  $('#sheetTitle').textContent = title;
+  $('#sheetBody').textContent = body;
+  $('#sheetYes').textContent = yes;
+  sheetAction = onYes;
+  $('#sheet').classList.remove('hide');
+}
+function hideSheet() { $('#sheet').classList.add('hide'); sheetAction = null; }
+
+$('#sheetNo').onclick = hideSheet;
+$('#sheetYes').onclick = () => { const a = sheetAction; hideSheet(); if (a) a(); };
+// Tapping the backdrop is the same as keeping it: the safe answer is the one
+// that happens by accident.
+$('#sheet').onclick = e => { if (e.target === $('#sheet')) hideSheet(); };
+
+function forgetSheet(id) {
+  const c = known.find(k => k.id === id);
+  if (!c) return;
+  showSheet(
+    'Forget ' + (c.label || 'this camera') + '?',
+    'The module will stop connecting to it. To add it back you will need it ' +
+    'switched on and in range. Nothing on the camera itself is changed.',
+    'Forget',
+    async () => {
+      try {
+        const r = await fetch('/api/forget', {
+          method: 'POST', body: new URLSearchParams({mac: id}),
+        });
+        toast(r.ok ? 'Camera forgotten' : 'Could not forget it');
+      } catch (e) { toast('Could not forget it'); }
+      $('#knownList').dataset.key = '';
+      $('#camList').dataset.key = '';
+    });
+}
+
 let armedMac = null, armTimer = null;
 
 function renderCams(cams) {
@@ -638,8 +924,8 @@ function renderCams(cams) {
 
   box.innerHTML = cams.map(c => {
     const cls = c.id === armedMac ? 'armed' : (c.bound ? 'sel' : '');
-    const label = c.id === armedMac ? 'Tap again to select'
-                : c.bound          ? 'Selected'
+    const label = c.id === armedMac ? 'Tap again to add'
+                : c.bound          ? 'Already saved'
                 : (c.model || c.name || 'DJI camera');
     // data-id is the separator-free form the firmware parses; c.mac with its
     // colons is for the human reading the row.
@@ -683,9 +969,10 @@ async function selectCam(id) {
       method: 'POST',
       body: new URLSearchParams({mac: id})
     });
-    toast(r.ok ? 'Camera selected' : 'Could not select: ' + (await r.text()));
-  } catch (e) { toast('Could not select'); }
+    toast(r.ok ? 'Camera added' : 'Could not add it: ' + (await r.text()));
+  } catch (e) { toast('Could not add it'); }
   $('#camList').dataset.key = '';
+  $('#knownList').dataset.key = '';
 }
 
 async function poll() {
@@ -845,6 +1132,9 @@ $('#save').onclick = async () => {
     aux:  $('#aux').value,
     min:  $('#min').value,
     max:  $('#max').value,
+    stopdelay: $('#stopdelay').value,
+    warnbatt:  $('#warnbatt').value,
+    warncard:  $('#warncard').value,
   });
   try {
     const r = await fetch('/api/config', {method: 'POST', body});
@@ -967,13 +1257,10 @@ arm($('#repair'), 'Tap again to forget keys', async () => {
   } catch (e) { toast('Could not clear the keys'); }
 });
 
-arm($('#forget'), 'Tap again to release', async () => {
-  try {
-    const r = await fetch('/api/forget', {method: 'POST'});
-    toast(r.ok ? 'Camera released' : 'Failed');
-    $('#camList').dataset.key = '';
-  } catch (e) { toast('Failed'); }
-});
+/* The "Forget" button that used to live here released the module's one
+   camera. There is a list now, and each card forgets its own on a tap -- a
+   single button could only ever have meant "forget all of them", which is not
+   what anybody reaching for it after adding a second camera would expect. */
 
 poll();
 </script>

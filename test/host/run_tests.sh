@@ -17,6 +17,8 @@ cc $CFLAGS -I../../components/webcfg -o test_url_decode \
 cc $CFLAGS -I../../components/camlink/include -o test_press test_press.c
 cc $CFLAGS -I../../components/camlink/include -o test_override test_override.c
 cc $CFLAGS -I../../components/camlink/include -o test_setup_guard test_setup_guard.c
+cc $CFLAGS -I../../components/camlink/include -o test_warn test_warn.c
+cc $CFLAGS -I../../components/duml/include -o test_bind test_bind.c
 echo
 ./test_msp_frames
 echo
@@ -35,3 +37,7 @@ echo
 ./test_override
 echo
 ./test_setup_guard
+echo
+./test_warn
+echo
+./test_bind

@@ -1,5 +1,6 @@
-# ESP32-C3 -- the reference part. Ships on the C3 Supermini, and the only one
-# that has flown.
+# ESP32-C5. Dual-band, and the full -24 dBm ladder like the C3.
+#
+# Preview: v1.0 silicon wants ESP-IDF v5.5.2 or newer. It builds on v5.5.
 # Console on the native USB Serial/JTAG peripheral, so UART1 (the FC link) and
 # UART0 both stay free.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

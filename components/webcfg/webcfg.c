@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -26,6 +27,7 @@
 #include "nvs.h"
 
 #include "camlink_cfg.h"
+#include "board.h"
 #include "osd_fields.h"
 #include "url_decode.h"
 #include "duml_cam.h"
@@ -174,6 +176,30 @@ static esp_err_t page_get(httpd_req_t *req)
     return httpd_resp_send(req, (const char *)page_start, page_end - page_start);
 }
 
+/* Append to a fixed buffer, and never past the end of it.
+ *
+ * The state document is built by a run of `n += snprintf(body + n,
+ * sizeof(body) - n, ...)`. snprintf returns the length it WOULD have written,
+ * so once the buffer fills, n keeps climbing past it -- and `sizeof(body) - n`
+ * is a size_t, so the next call is handed an enormous length and writes past
+ * the end. Only the RC loop guarded against it, and only because that loop is
+ * unbounded; every other line was safe by having enough room, which is a
+ * property that quietly stops holding the next time a field is added.
+ *
+ * Clamping here makes the failure a truncated document -- which the page reads
+ * as a parse error and reports -- rather than a corrupted heap. */
+static int jappend(char *buf, size_t cap, int n, const char *fmt, ...)
+{
+    if (n < 0 || (size_t)n >= cap) return (int)cap;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(buf + n, cap - (size_t)n, fmt, ap);
+    va_end(ap);
+    if (w < 0) return n;
+    n += w;
+    return ((size_t)n >= cap) ? (int)cap : n;
+}
+
 static esp_err_t state_get(httpd_req_t *req)
 {
     camlink_cfg_t cfg;
@@ -192,10 +218,26 @@ static esp_err_t state_get(httpd_req_t *req)
 
     const esp_app_desc_t *app = esp_app_get_description();
 
-    char body[2048];
-    int  n = snprintf(body, sizeof(body),
+    /* STATIC, not on the stack.
+     *
+     * This buffer grew from 2048 to 3072 when the module gained a list of
+     * cameras instead of one, and 3072 bytes of locals in a handler running on
+     * a 5120-byte httpd task stack is a stack overflow -- which presents as the
+     * module rebooting a few seconds into config mode, dropping the access
+     * point and, because the config flag is consumed on read, coming back up in
+     * normal mode. It looks exactly like "setup exits by itself".
+     *
+     * Static is safe here: esp_http_server dispatches every handler from one
+     * task, sequentially, so two responses are never being built at once. It
+     * also costs the same 3 KB whether or not anyone opens the page, which in
+     * config mode is the right trade -- the alternative is a handler whose
+     * safety depends on nobody adding another field to it. */
+    static char body[3072];
+    int  n = 0;
+    n = jappend(body, sizeof(body), n,
         "{\"ssid\":\"%s\",\"fw\":\"%s\","
-        "\"cfg\":{\"mode\":%u,\"aux\":%d,\"min\":%u,\"max\":%u,\"tx\":%u,\"kind\":%u,\"txauto\":%u,\"cfgaux\":%d,\"cfgkind\":%u,\"cfghold\":%u},"
+        "\"cfg\":{\"mode\":%u,\"aux\":%d,\"min\":%u,\"max\":%u,\"tx\":%u,\"kind\":%u,\"txauto\":%u,\"cfgaux\":%d,\"cfgkind\":%u,\"cfghold\":%u,"
+        "\"stopdelay\":%u,\"warnbatt\":%u,\"warncard\":%u,\"stopmax\":%u},"
         "\"cam\":{\"bound\":%s,\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
         "\"fault\":\"%s\",\"fails\":%u,\"everup\":%s},"
         "\"fc\":{\"link\":%s,\"armed\":%s,\"n\":%u,\"rc\":[",
@@ -204,6 +246,8 @@ static esp_err_t state_get(httpd_req_t *req)
         cfg.range_min, cfg.range_max, cfg.tx_power, cfg.switch_kind, cfg.tx_auto,
         cfg.cfg_channel ? cfg_index_to_aux(cfg.cfg_channel) : 0,
         cfg.cfg_kind, cfg.cfg_hold_ds,
+        cfg.stop_delay_s, cfg.warn_batt_pct, cfg.warn_card_min,
+        CAMLINK_STOP_DELAY_MAX_S,
         bound ? "true" : "false",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
         camlink_ble_fault_text(fault_reason), (unsigned)fault_count,
@@ -216,10 +260,10 @@ static esp_err_t state_get(httpd_req_t *req)
      * this list once hid the user's own arm and record switches, which sat on
      * channels past the cut, and cost an evening of "the button isn't detected". */
     for (unsigned i = 0; i < fc.rc_count && i < MSP_MAX_RC_CHANNELS; i++) {
-        n += snprintf(body + n, sizeof(body) - n, "%s%u", i ? "," : "", fc.rc[i]);
-        if (n >= (int)sizeof(body) - 8) break;
+        n = jappend(body, sizeof(body), n, "%s%u", i ? "," : "", fc.rc[i]);
+        if ((size_t)n >= sizeof(body)) break;
     }
-    n += snprintf(body + n, sizeof(body) - n, "]},");
+    n = jappend(body, sizeof(body), n, "]},");
 
     /* The OSD field catalogue, straight from the firmware.
      *
@@ -228,26 +272,66 @@ static esp_err_t state_get(httpd_req_t *req)
      * hard-coding it in the page means the two cannot drift: add a field to
      * osd_fields[] and the picker grows a tile for it, with the right budget,
      * without the JavaScript being touched. */
-    n += snprintf(body + n, sizeof(body) - n, "\"osdmax\":%d,\"fields\":[", OSD_ROW_MAX);
-    for (int f = 1; f < OSD_F__COUNT; f++) {
-        n += snprintf(body + n, sizeof(body) - n,
-                      "%s{\"id\":%d,\"name\":\"%s\",\"ex\":\"%s\",\"w\":%u}",
-                      f > 1 ? "," : "", f, osd_fields[f].name,
-                      osd_fields[f].example, (unsigned)osd_fields[f].width);
+    /* The transmit ladder, for the same reason the field catalogue below is
+     * sent rather than duplicated: what a rung is worth in dBm is a property of
+     * the part, and the C3's -24 dBm floor does not exist on a C6, whose radio
+     * stops at -15 dBm. A page with the numbers written into it would say
+     * "-24 dBm" beside a radio running 9 dB louder. It also sends the COUNT,
+     * because the original ESP32 has three rungs where everything else has
+     * four, and a fourth button there would select a level the part cannot
+     * produce. */
+    /* The cameras this module holds, in priority order -- index 0 is
+     * priority 1. The page draws them above the discovery list and sends an
+     * order back to /api/order when they are dragged. */
+    n = jappend(body, sizeof(body), n, "\"bindmax\":%d,\"known\":[", CAM_BIND_MAX);
+    for (int i = 0; i < duml_cam_bind_count(); i++) {
+        cam_bind_t c;
+        if (!duml_cam_bind_get(i, &c)) break;
+        n = jappend(body, sizeof(body), n,
+                    "%s{\"id\":\"%02X%02X%02X%02X%02X%02X\","
+                    "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+                    "\"label\":\"%s\",\"model\":\"%s\"}",
+                    i ? "," : "",
+                    c.addr[0], c.addr[1], c.addr[2], c.addr[3], c.addr[4], c.addr[5],
+                    c.addr[0], c.addr[1], c.addr[2], c.addr[3], c.addr[4], c.addr[5],
+                    c.label, cam_scan_model_name(c.model));
     }
-    n += snprintf(body + n, sizeof(body) - n, "],\"osd\":[");
+    n = jappend(body, sizeof(body), n, "],");
+
+    n = jappend(body, sizeof(body), n, "\"tx\":[");
+    for (int i = 0; i < board_tx_count(); i++) {
+        n = jappend(body, sizeof(body), n, "%s\"%s\"",
+                      i ? "," : "", board_tx_name((uint8_t)i));
+    }
+    n = jappend(body, sizeof(body), n, "],");
+
+    n = jappend(body, sizeof(body), n, "\"osdmax\":%d,\"fields\":[", OSD_ROW_MAX);
+    for (int f = 1; f < OSD_F__COUNT; f++) {
+        n = jappend(body, sizeof(body), n,
+                    "%s{\"id\":%d,\"name\":\"%s\",\"ex\":\"%s\",\"w\":%u}",
+                    f > 1 ? "," : "", f, osd_fields[f].name,
+                    osd_fields[f].example, (unsigned)osd_fields[f].width);
+    }
+    n = jappend(body, sizeof(body), n, "],\"osd\":[");
     for (int r = 0; r < OSD_ROWS; r++) {
-        n += snprintf(body + n, sizeof(body) - n, "%s[", r ? "," : "");
+        n = jappend(body, sizeof(body), n, "%s[", r ? "," : "");
         for (int i = 0; i < OSD_ROW_FIELDS; i++) {
-            n += snprintf(body + n, sizeof(body) - n, "%s%u",
+            n = jappend(body, sizeof(body), n, "%s%u",
                           i ? "," : "", (unsigned)cfg.osd[r][i]);
         }
-        n += snprintf(body + n, sizeof(body) - n, "]");
+        n = jappend(body, sizeof(body), n, "]");
     }
-    n += snprintf(body + n, sizeof(body) - n, "]}");
+    n = jappend(body, sizeof(body), n, "]}");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if ((size_t)n >= sizeof(body)) {
+        /* Truncated: say so rather than serving half a document that the page
+         * would fail to parse with no explanation. */
+        ESP_LOGE(TAG, "state document did not fit in %u bytes", (unsigned)sizeof(body));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "state too large");
+        return ESP_FAIL;
+    }
     return httpd_resp_send(req, body, n);
 }
 
@@ -286,7 +370,11 @@ static bool field_u32(const char *body, const char *key, uint32_t *out)
 
 static esp_err_t config_post(httpd_req_t *req)
 {
-    char body[192];
+    /* Grew with the form. Three more integers is about 45 bytes of
+     * "stopdelay=30&warnbatt=100&warncard=255"; 256 leaves the same kind of
+     * margin 192 used to. read_body() refuses anything longer rather than
+     * truncating it into a half-parsed form. */
+    char body[256];
     if (!read_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
         return ESP_FAIL;
@@ -297,11 +385,15 @@ static esp_err_t config_post(httpd_req_t *req)
      * the user never asked for and cannot see. Either the whole form lands or
      * none of it does. */
     uint32_t mode, aux, lo, hi, tx, kind, txauto, cfgaux, cfgkind, cfghold;
+    uint32_t stopdelay, warnbatt, warncard;
     if (!field_u32(body, "mode", &mode) || !field_u32(body, "aux", &aux) ||
         !field_u32(body, "min", &lo)    || !field_u32(body, "max", &hi)  ||
         !field_u32(body, "tx", &tx)     || !field_u32(body, "kind", &kind) ||
         !field_u32(body, "txauto", &txauto) || !field_u32(body, "cfgaux", &cfgaux) ||
-        !field_u32(body, "cfgkind", &cfgkind) || !field_u32(body, "cfghold", &cfghold)) {
+        !field_u32(body, "cfgkind", &cfgkind) || !field_u32(body, "cfghold", &cfghold) ||
+        !field_u32(body, "stopdelay", &stopdelay) ||
+        !field_u32(body, "warnbatt", &warnbatt) ||
+        !field_u32(body, "warncard", &warncard)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing field");
         return ESP_FAIL;
     }
@@ -310,9 +402,15 @@ static esp_err_t config_post(httpd_req_t *req)
      * 900-2100 while the store still rejected anything outside 1000-2000, so a
      * legitimate form came back 500 with the mode already written and the
      * window not. Sharing the constants is what stops that recurring. */
-    if (mode >= CFG_MODE__COUNT || tx >= CFG_TX__COUNT || kind > CFG_SW_BUTTON ||
+    /* board_tx_count() rather than CFG_TX__COUNT: the stored enum has four
+     * rungs, but a part may have fewer, and accepting a rung the radio cannot
+     * produce would store a setting that silently reads back as a different
+     * power than the one chosen. */
+    if (mode >= CFG_MODE__COUNT || tx >= (uint32_t)board_tx_count() || kind > CFG_SW_BUTTON ||
         txauto > 1 || cfgaux > 14 || cfgkind > CFG_SW_BUTTON ||
         cfghold > CAMLINK_CFG_HOLD_DS_MAX ||
+        stopdelay > CAMLINK_STOP_DELAY_MAX_S ||
+        warnbatt > 100 || warncard > 255 ||
         aux < 1 || aux > 14 ||
         lo < CAMLINK_RC_US_MIN || hi > CAMLINK_RC_US_MAX || lo >= hi) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "out of range");
@@ -328,7 +426,9 @@ static esp_err_t config_post(httpd_req_t *req)
            /* 0 means no setup switch; anything else is an AUX number. */
            && camlink_cfg_set_config_channel(cfgaux ? cfg_aux_to_index((uint8_t)cfgaux) : 0)
            && camlink_cfg_set_config_kind((uint8_t)cfgkind)
-           && camlink_cfg_set_config_hold((uint8_t)cfghold);
+           && camlink_cfg_set_config_hold((uint8_t)cfghold)
+           && camlink_cfg_set_stop_delay((uint8_t)stopdelay)
+           && camlink_cfg_set_warn((uint8_t)warnbatt, (uint8_t)warncard);
 
     if (!ok) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save failed");
@@ -404,10 +504,9 @@ static esp_err_t scan_get(httpd_req_t *req)
     cam_scan_entry_t cams[CAM_SCAN_MAX];
     int n = cam_scan_get(cams, CAM_SCAN_MAX);
 
-    uint8_t bound_mac[6];
-    bool bound = duml_cam_bound_addr(bound_mac);
-
-    char body[1400];
+    /* Static for the same reason as the state document above -- one httpd
+     * task, one response at a time. */
+    static char body[1400];
     int  w = snprintf(body, sizeof(body), "{\"cams\":[");
 
     for (int i = 0; i < n; i++) {
@@ -426,7 +525,10 @@ static esp_err_t scan_get(httpd_req_t *req)
             c->bda[0], c->bda[1], c->bda[2], c->bda[3], c->bda[4], c->bda[5],
             c->bda[0], c->bda[1], c->bda[2], c->bda[3], c->bda[4], c->bda[5],
             c->name, cam_scan_model_name(c->model), c->rssi,
-            (bound && memcmp(bound_mac, c->bda, 6) == 0) ? "true" : "false");
+            /* Any camera the module holds, not only the top-priority one --
+             * the list shows all of them and a card must not offer to bind
+             * something that is already up there. */
+            duml_cam_is_bound(c->bda) ? "true" : "false");
     }
     w += snprintf(body + w, sizeof(body) - w, "]}");
 
@@ -500,7 +602,55 @@ static esp_err_t bind_post(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    duml_cam_set_binding(mac, model, name);
+    if (!duml_cam_bind_add(mac, model, name)) {
+        /* Full. Said plainly rather than by silently evicting the camera at
+         * the bottom -- which would be somebody's other aircraft, dropped
+         * without them being told. */
+        /* 403 rather than 409: esp_http_server has no 409, and the page reads
+         * the message rather than the code. */
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN,
+                            "already holding the maximum number of cameras");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+/* Reorder the priority list.
+ *
+ * The body is the addresses in the order the user dragged them into, top
+ * first, as bare hex separated by commas. Addresses rather than indices, so a
+ * page holding a stale copy of the list cannot reorder the wrong entries --
+ * see the note in cam_bind.h. */
+static esp_err_t order_post(httpd_req_t *req)
+{
+    char body[160];
+    if (!read_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_FAIL;
+    }
+    char v[128];
+    if (httpd_query_key_value(body, "order", v, sizeof(v)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing order");
+        return ESP_FAIL;
+    }
+    url_decode(v);   /* the separators arrive as %2C */
+
+    uint8_t order[CAM_BIND_MAX][6];
+    int n = 0;
+    for (char *p = v; *p && n < CAM_BIND_MAX; ) {
+        char *comma = strchr(p, ',');
+        if (comma) *comma = '\0';
+        if (!parse_mac(p, order[n])) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad mac");
+            return ESP_FAIL;
+        }
+        n++;
+        if (!comma) break;
+        p = comma + 1;
+    }
+
+    duml_cam_bind_reorder(order, n);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
@@ -680,9 +830,34 @@ fail:
     return ESP_FAIL;
 }
 
+/* Forget one camera, named by address.
+ *
+ * A body with no "mac" forgets every one of them -- which is what this endpoint
+ * did when a module held exactly one camera, so a page from an older firmware
+ * still does what it meant. */
 static esp_err_t forget_post(httpd_req_t *req)
 {
-    ESP_LOGW(TAG, "forget requested by client");
+    char body[64];
+    char macstr[16];
+    uint8_t mac[6];
+
+    if (req->content_len > 0 && read_body(req, body, sizeof(body)) &&
+        httpd_query_key_value(body, "mac", macstr, sizeof(macstr)) == ESP_OK) {
+        if (!parse_mac(macstr, mac)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad mac");
+            return ESP_FAIL;
+        }
+        if (!duml_cam_bind_forget(mac)) {
+            /* Already gone. Answered as success: the page asked for it not to
+             * be bound, and it is not bound. A second tap on a stale card
+             * should not produce an error the user cannot act on. */
+            ESP_LOGW(TAG, "forget: that camera was not bound");
+        }
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":true}");
+    }
+
+    ESP_LOGW(TAG, "forget-all requested by client");
     duml_cam_forget_binding();
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
@@ -761,7 +936,7 @@ static esp_err_t not_found(httpd_req_t *req, httpd_err_code_t err)
 static void http_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 12;
+    cfg.max_uri_handlers = 13;
     cfg.lru_purge_enable = true;
     cfg.stack_size       = 5120;
     /* A 1.4 MB upload from a phone is slow and bursty; the stock 5 s would
@@ -782,6 +957,7 @@ static void http_start(void)
         { .uri = "/api/scan",    .method = HTTP_GET,  .handler = scan_get   },
         { .uri = "/api/bind",    .method = HTTP_POST, .handler = bind_post  },
         { .uri = "/api/forget",  .method = HTTP_POST, .handler = forget_post },
+        { .uri = "/api/order",   .method = HTTP_POST, .handler = order_post },
         { .uri = "/api/repair",  .method = HTTP_POST, .handler = repair_post },
         { .uri = "/api/exit",    .method = HTTP_POST, .handler = exit_post  },
         { .uri = "/api/update",  .method = HTTP_POST, .handler = update_post },

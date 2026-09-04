@@ -14,6 +14,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "cam_bind.h"
+
 #define DUML_CAM_STALE_MS 1500
 
 typedef enum {
@@ -48,24 +50,43 @@ void duml_cam_start(void);
 /* There is deliberately no "adopt the next camera found" call. Bindings are
  * created in exactly one place -- the user picking from the config-mode scan
  * list -- because anything that adopts a camera on its own eventually adopts
- * the wrong one, and cannot be observed doing it. */
+ * the wrong one, and cannot be observed doing it.
+ *
+ * ---- The bound-camera list ------------------------------------------------
+ *
+ * A module holds up to CAM_BIND_MAX cameras in priority order and connects to
+ * the highest-priority one that is actually switched on. See cam_bind.h for
+ * the list operations and why the choice happens at connect time only.
+ *
+ * All of these are storage calls that do not touch the BLE stack, so config
+ * mode -- which runs with the radio switched to Wi-Fi and BLE never started --
+ * can read and edit the list safely. */
+int  duml_cam_bind_count(void);
+bool duml_cam_bind_get(int i, cam_bind_t *out);   /* i = 0 is top priority */
 
-/* The stored binding, straight out of NVS. Both are pure storage calls that do
- * not touch the BLE stack, so config mode -- which runs with the radio switched
- * to Wi-Fi and BLE never started -- can read and clear the binding safely.
- * duml_cam_bound_addr() returns false when nothing is bound. */
+/* Add a camera the user picked, at the end of the list. Re-adding one already
+ * held refreshes it and keeps its position. False when the list is full. */
+bool duml_cam_bind_add(const uint8_t addr[6], uint8_t model, const char *name);
+
+bool duml_cam_bind_forget(const uint8_t addr[6]);
+
+/* Reorder by address, top priority first. Addresses rather than indices,
+ * because the page's copy of the list can be stale -- see cam_bind.h. */
+int  duml_cam_bind_reorder(const uint8_t (*order)[6], int n);
+
+/* Is this camera one of ours? Used by the scan list to mark the entries the
+ * module already holds. */
+bool duml_cam_is_bound(const uint8_t addr[6]);
+
+/* The top-priority camera's address, false when nothing is bound at all. */
 bool duml_cam_bound_addr(uint8_t out[6]);
+
+/* Forget every camera. */
 void duml_cam_forget_binding(void);
 
-/* Bind to a specific camera, chosen by the user from the config-mode scan list
- * rather than adopted because it happened to be loudest. Storage only -- it
- * takes effect on the next normal boot, which is also when the pairing PIN
- * appears on the camera. */
-void duml_cam_set_binding(const uint8_t addr[6], uint8_t model,
-                          const char *name);
-
-/* Advertised model code of the bound camera, 0 if unknown. The protocol the
- * module speaks is derived from this, so it is stored with the binding. */
+/* Advertised model code of the camera currently CONNECTED (or last tried), 0
+ * if unknown. Not the top of the list: with several cameras held, which one
+ * answered is the one whose model matters. */
 uint8_t duml_cam_bound_model(void);
 void duml_cam_get(duml_cam_status_t *out);
 

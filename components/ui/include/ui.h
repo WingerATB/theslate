@@ -1,26 +1,26 @@
 /* SPDX-License-Identifier: PolyForm-Strict-1.0.0
  *
- * Front panel: the Supermini's onboard button and LED.
+ * Front panel: one status LED and one button.
  *
- * GPIO8  = blue LED, INVERTED (drive LOW to light it)
- * GPIO9  = BOOT button, internally pulled up (reads LOW when pressed)
+ * WHICH pins those are is not decided here. It used to be -- GPIO8 and GPIO9
+ * were #defines in this header, which is correct for the ESP32-C3 Supermini
+ * and correct for nothing else. Boards carrying the same chip put the LED
+ * somewhere else, drive it the other way up, replace it with an addressable
+ * WS2812 this code cannot drive, or have none at all. The pins, their polarity
+ * and whether they exist come from board_profile() now.
  *
- * Both are ESP32-C3 strapping pins, and the project brief says to avoid them.
- * That warning is about EXTERNAL circuits that can hold them at boot: GPIO9 low
- * at reset enters the serial bootloader, and GPIO8 participates in boot
- * configuration. Reading the onboard button and driving the onboard LED once
- * the chip is already running is exactly what the board is designed for, adds
- * no external load, and cannot affect the next boot. Nothing else may be wired
- * to these pins.
+ * This file is left with what is genuinely about the front panel rather than
+ * about the board: the gestures, the timings and the LED vocabulary.
+ *
+ * A board with no LED runs every state below as a no-op, and one with no
+ * button simply never reports a press. Both are announced at boot by
+ * board_report() rather than being left to be discovered.
  */
 #ifndef CAMLINK_UI_H
 #define CAMLINK_UI_H
 
 #include <stdbool.h>
 #include <stdint.h>
-
-#define UI_LED_GPIO     8
-#define UI_BUTTON_GPIO  9
 
 /* Long-press threshold for entering bind mode. Deliberately long: binding
  * drops the current camera, so it must not be reachable by a fumbled press. */
@@ -52,6 +52,14 @@ typedef enum {
  *   searching  slow blink      paired, looking for that camera
  *   connected  solid           camera present
  *   recording  solid + dip     camera present AND rolling
+ *   warning    fast blink      asked to record, and it is not happening
+ *
+ * The warning breaks the "how settled is the link" reading, and outranks all
+ * of it, because it is the only state that means something is WRONG rather
+ * than merely early. It is raised for the warnings that mean there is no
+ * recording right now -- not for a battery or a card that will run out later,
+ * which would leave the LED flashing at somebody for the whole of a session
+ * they can do nothing about until they land.
  *
  * Recording is deliberately a variant of solid rather than a separate blink:
  * it is a sub-state of connected, so it should still read as "connected" at a
@@ -64,6 +72,7 @@ typedef enum {
  * clear enough signal that this boot is not flying anywhere. */
 typedef enum {
     UI_LED_CONFIG,       /* off: Wi-Fi config mode                          */
+    UI_LED_WARNING,      /* fast blink: it was asked to record and is not   */
     UI_LED_RECORDING,    /* solid with a brief dip once a second            */
     UI_LED_CONNECTED,    /* solid                                           */
     UI_LED_SEARCHING,    /* slow blink                                      */

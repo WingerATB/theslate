@@ -116,9 +116,32 @@ esp_err_t ble_start_advertising(void);
  * _static  -> DEFAULT/ADV/SCAN power, call after esp_bt_controller_enable().
  * _conn    -> connection power, only valid once a connection exists.
  * _slow_conn_params -> request a 30-50 ms connection interval. */
-/* CAMLINK: restrict scanning to one camera. Pass NULL to accept the nearest
- * (bind mode). Prevents connecting to, and recording on, someone else's camera. */
+/* CAMLINK: which cameras this module is allowed to connect to.
+ *
+ * ONE SCAN DECIDES. The scan window already sees every camera that is
+ * advertising, so the choice between them is made from that single window
+ * rather than by trying each in turn: whichever bound camera is present with
+ * the LOWEST INDEX wins, and RSSI only breaks a tie between adverts from the
+ * same camera.
+ *
+ * Trying them one at a time was the obvious implementation and it is subtly
+ * wrong as well as slow. A camera that is switched on but slow to advertise
+ * would time out and hand the link to a lower-priority one that answered
+ * quicker -- so "highest priority that is switched on" would quietly become
+ * "whichever replied first". Seeing them all in one window cannot do that.
+ *
+ * Pass n = 0 to accept nothing at all, which is what a module with no camera
+ * configured must do. */
+#define BLE_BOUND_MAX  8
+void ble_set_bound_list(const uint8_t (*addrs)[6], int n);
+
+/* Equivalent to a one-camera list. Pass NULL to clear. */
 void ble_set_bound_addr(const uint8_t *addr);
+
+/* Which of the bound cameras the last scan actually chose. False when none was
+ * seen. The caller looks it up in its own list to find out what protocol to
+ * speak to it -- the BLE layer holds addresses and nothing else. */
+bool ble_get_selected_addr(uint8_t out[6]);
 
 /* True if this advertisement is a DJI camera. Exported so the config-mode
  * scanner identifies cameras by exactly the same rule the connect path uses --

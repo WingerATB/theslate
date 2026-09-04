@@ -1,0 +1,14 @@
+# ESP32-S3.
+#
+# The closest thing to a drop-in there is: IDF maps the S3 onto the C3's
+# Bluetooth controller outright (components/bt/CMakeLists.txt sets
+# target_name "esp32c3" for it), so the transmit ladder -- including the -24 dBm
+# floor the module relies on to stay off the ELRS receiver -- is identical.
+# Dual-core Xtensa with more RAM than the C3, and native USB.
+#
+# The board is NOT identical. An S3 DevKitC has no plain LED, only an
+# addressable WS2812, so SLATE_LED_GPIO stays at -1 and the status LED does
+# nothing until someone points it at real hardware. BOOT is GPIO0.
+# Console on the native USB Serial/JTAG peripheral, so UART1 (the FC link) and
+# UART0 both stay free.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

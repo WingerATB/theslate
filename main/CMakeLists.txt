@@ -11,7 +11,16 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../dev/components/bench")
     set(BENCH_REQ "bench")
 endif()
 
+# esp_driver_usb_serial_jtag is still deliberately absent: nothing here calls
+# the driver, and the component does not exist for a target without the
+# peripheral, so requiring it would break the original ESP32 build.
+#
+# What app_main DOES use is the register-level header, hal/usb_serial_jtag_ll.h,
+# to ask whether a USB host is sending start-of-frame packets. That lives in
+# "hal", which every target has, and the one call site is behind
+# SOC_USB_SERIAL_JTAG_SUPPORTED so a part without the peripheral compiles the
+# stub instead.
 idf_component_register(SRCS "app_main.c"
                        INCLUDE_DIRS "."
-                       REQUIRES camlink msp dji_link duml ui webcfg nvs_flash bt
-                                esp_driver_usb_serial_jtag ${BENCH_REQ})
+                       REQUIRES camlink msp dji_link duml ui webcfg board
+                                nvs_flash bt hal esp_driver_gpio ${BENCH_REQ})

@@ -25,7 +25,7 @@
 #include "duml_cam.h"
 #include "camlink_cfg.h"
 #include "ui.h"
-#include "driver/usb_serial_jtag.h"
+#include "board.h"
 #include <stdarg.h>
 #include <string.h>
 #include "ble.h"
@@ -40,6 +40,7 @@
 #include "webcfg.h"
 #include "cam_scan.h"
 #include "esp_heap_caps.h"
+#include "soc/soc_caps.h"
 #include "esp_timer.h"
 
 /* Bench console. Lives in dev/, which the published tree does not carry, so
@@ -297,8 +298,15 @@ static void ui_task_update(void *arg)
         cam_status_t cam;
         camlink_get_cam_status(&cam);
 
-        /* Highest-priority true condition wins the single LED. */
-        if (cam.connected && cam.recording_valid && cam.recording) {
+        /* Highest-priority true condition wins the single LED.
+         *
+         * The warning comes first, and only for the class that means there is
+         * no recording happening now -- see the ladder in camlink_warn.h. A
+         * card that will fill in four minutes is worth a word on the OSD and
+         * is not worth a light flashing in somebody's face. */
+        if (camlink_get_warn() >= CAM_WARN_NOT_REC) {
+            ui_set_led(UI_LED_WARNING);
+        } else if (cam.connected && cam.recording_valid && cam.recording) {
             ui_set_led(UI_LED_RECORDING);
         } else if (cam.connected) {
             ui_set_led(UI_LED_CONNECTED);
@@ -310,20 +318,6 @@ static void ui_task_update(void *arg)
             ui_set_led(UI_LED_UNPAIRED);
         }
         vTaskDelay(pdMS_TO_TICKS(200));
-    }
-}
-
-/* Map the stored setting onto the controller's power enum. The enum's numeric
- * values are an IDF detail; the stored value is ours. Keep the translation in
- * one place so a future IDF renumbering cannot quietly make a saved -24 dBm
- * mean something louder. */
-static int tx_level_for(uint8_t cfg_tx)
-{
-    switch (cfg_tx) {
-    case CFG_TX_N12: return ESP_PWR_LVL_N12;
-    case CFG_TX_N0:  return ESP_PWR_LVL_N0;
-    case CFG_TX_P3:  return ESP_PWR_LVL_P3;
-    default:         return ESP_PWR_LVL_N24;
     }
 }
 
@@ -436,7 +430,7 @@ static void config_mode(void)
     {
         camlink_cfg_t c;
         camlink_cfg_get(&c);
-        camlink_ble_set_tx_level(tx_level_for(c.tx_power));
+        camlink_ble_set_tx_level(board_tx_level(c.tx_power));
 
         esp_err_t e = cam_scan_start();
         if (e != ESP_OK) {
@@ -504,11 +498,57 @@ static void ota_probation_start(void)
     xTaskCreate(ota_confirm_task, "otaok", 3072, NULL, 2, NULL);
 }
 
+/* --------------------------------------------------------------------------
+ * Plugged into a computer
+ *
+ * A module on a bench, on a USB cable, is being set up -- not flown. So it
+ * comes up in config mode without anyone having to hold a button for ten
+ * seconds first.
+ *
+ * WHAT MAKES THIS SAFE IS THE SIGNAL, not a timer or a guess. A USB host sends
+ * a start-of-frame packet every millisecond; a charger, a power bank and the
+ * flight controller's own 5 V pad send nothing at all. So this asks the USB
+ * peripheral whether SOF packets are arriving, which answers "is there a
+ * computer on the other end of this cable" rather than "is there 5 V on it" --
+ * and 5 V is exactly what a module wired to an FC has all the time.
+ *
+ * Sampled once, here, rather than by installing the driver's connection
+ * monitor: that adds work to every FreeRTOS tick for the whole flight, to
+ * answer a question that only matters in the first 20 ms of a boot.
+ *
+ * The armed guard is not skipped, it is simply enforced later: config mode's
+ * own task leaves setup the moment the flight controller reports armed, and
+ * that check runs four times a second for as long as setup is up.
+ * -------------------------------------------------------------------------- */
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+#include "hal/usb_serial_jtag_ll.h"
+
+static bool usb_host_present(void)
+{
+    /* Clear the latched bit, wait past several 1 ms frames, and look again.
+     * 20 ms is long enough that a genuine host cannot miss the window and
+     * short enough to be invisible in a boot that already takes 300 ms. */
+    usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SOF);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    bool sof = (usb_serial_jtag_ll_get_intraw_mask() & USB_SERIAL_JTAG_INTR_SOF) != 0;
+    usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SOF);
+    return sof;
+}
+#else
+/* The original ESP32 has no USB peripheral at all, so there is no cable to
+ * detect and the button remains the way in. */
+static bool usb_host_present(void) { return false; }
+#endif
+
 /* -------------------------------------------------------------------------- */
 
 void app_main(void)
 {
     ESP_LOGI(TAG, "SlateFPV starting");
+    /* Before anything claims a GPIO or the radio. "Which board does this image
+     * think it is" is the first question when a port does nothing at all, and
+     * it should not require attaching a debugger to answer. */
+    board_report();
 
     /* NVS before anything reads it. ble_init() also initialises NVS, but the
      * config-mode boot never gets that far, and the boot flag is read before
@@ -521,7 +561,18 @@ void app_main(void)
 
     /* Consumed on read: config mode lasts exactly one boot, so a module can
      * never be left stuck in it. */
-    if (webcfg_boot_flag_take()) {
+    bool want_config = webcfg_boot_flag_take();
+
+    /* ...or a computer is on the other end of the USB cable. Not consumed on
+     * read, because it is not stored -- unplug the cable and the next boot is
+     * a normal one, which gives this the same "cannot get stuck" property the
+     * flag has. */
+    if (!want_config && usb_host_present()) {
+        ESP_LOGW(TAG, "a computer is on the USB cable -- starting in setup");
+        want_config = true;
+    }
+
+    if (want_config) {
         config_mode();
         return;
     }
@@ -557,8 +608,8 @@ void app_main(void)
     {
         camlink_cfg_t c;
         camlink_cfg_get(&c);
-        camlink_ble_set_tx_level(tx_level_for(c.tx_power));
-        ESP_LOGI(TAG, "BLE TX power %s", camlink_cfg_tx_name(c.tx_power));
+        camlink_ble_set_tx_level(board_tx_level(c.tx_power));
+        ESP_LOGI(TAG, "BLE TX power %s", board_tx_name(c.tx_power));
     }
 
     /* The camera half speaks DUML: the Osmo Nano ignores the DJI R SDK

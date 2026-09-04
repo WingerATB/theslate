@@ -9,7 +9,7 @@
 
 **Arm the quad. The camera rolls.**
 
-[![Release](https://img.shields.io/badge/release-1.0.0--beta1-0F8A4A?style=flat-square)](../../releases)
+[![Release](https://img.shields.io/badge/release-1.1.0--beta1-0F8A4A?style=flat-square)](../../releases)
 [![License](https://img.shields.io/badge/license-PolyForm%20Strict-14171C?style=flat-square)](LICENSE)
 [![Hardware](https://img.shields.io/badge/hardware-ESP32--C3-5B636E?style=flat-square)](#what-you-need)
 [![Buy me a coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-FFDD00?style=flat-square&logo=buymeacoffee&logoColor=14171C)](https://www.buymeacoffee.com/wingeratb)
@@ -73,8 +73,21 @@ tab, no peripheral is needed on that UART — just leave it free.
 
 You only do this once. After that, updates happen over Wi-Fi from your phone.
 
-Grab **`slate-<version>-full.bin`** from [Releases](../../releases) — the
-`-full` one, which contains everything the module needs to boot.
+Grab **`slate-<version>-<chip>-full.bin`** from [Releases](../../releases) —
+the `-full` one, which contains everything the module needs to boot.
+
+**Which chip?** If you bought a C3 Supermini, which is what this ships on, it is
+`esp32c3`. There is no single file that works on all of them: an image carries
+the chip it was built for in its header, and both the module's bootloader and
+its own updater refuse a mismatch rather than half-flashing something that will
+not boot.
+
+**Only the C3 has flown.** The other images build, link and fit, and nobody has
+bound a camera with one. Two of them are also louder: the C6 and C61 radios stop
+at −15 dBm and the original ESP32 at −12 dBm, where the C3 reaches −24 dBm — so
+the quietest setting on those parts still transmits more next to your receiver
+than anything that has been flown here. Treat them as a starting point for a
+port rather than as a supported board.
 
 ### From your browser
 
@@ -88,7 +101,7 @@ install:
 2. Open the page in **Chrome or Edge** — it uses Web Serial, which Safari and
    Firefox do not support.
 3. Click **Connect** and pick the port that appears.
-4. Choose the `-full.bin` you downloaded.
+4. Choose the `-full.bin` you downloaded — the one for **your** chip.
 5. **Change the Flash Address to `0x0`.** The box is pre-filled with `0x1000`,
    which is the one thing here that will quietly go wrong — at that address the
    module has no bootloader in front of it and will not start.
@@ -108,9 +121,8 @@ downloaded as a standalone binary from
 [its releases page](https://github.com/espressif/esptool/releases) if you would
 rather not have Python involved.
 
-Either way you are writing the same `-full.bin` to offset `0x0` on an
-`esp32c3`. The browser tool above does exactly this and asks fewer questions, so
-reach for the terminal only if you already know you want to.
+Either way you are writing the same `-full.bin` to offset `0x0`, with `--chip`
+set to the chip that file was built for.
 
 ### The other file in each release
 
@@ -121,6 +133,10 @@ has no bootloader in front of it.
 
 Use `-full.bin` for a cable. Use `-update.bin` for updates from your phone.
 
+Both carry the chip in their name, and the updater checks it: hand it an image
+built for a different chip and it refuses before writing a byte, rather than
+staging something that cannot boot.
+
 ---
 
 ## Setting it up
@@ -130,7 +146,14 @@ account and no cable.
 
 ### Getting in
 
-**Hold the module's button for ten seconds.** It reboots, the LED goes dark, and
+**Plug it into a computer.** A module on a USB cable is being set up, not flown,
+so it comes up in setup on its own — no button hold, nothing to remember. It is
+the *computer* that does it rather than the 5 V: the module looks for the frame
+packets a USB host sends every millisecond, which a charger, a power bank and
+your flight controller's own 5 V pad never send. Wired to an FC it boots
+normally, every time.
+
+**Or hold the module's button for ten seconds.** It reboots, the LED goes dark, and
 an open Wi-Fi network called `SLATE-XXXX` appears — the last four characters
 come from the board itself, so two modules in the same field are never confused.
 Join it and the page opens on its own. If your phone does not offer it, go to
@@ -147,11 +170,11 @@ if you want to watch a channel move while you pick one.
 
 ## Every setting
 
-### Camera
+### Cameras
 
-A live list of what is in range, with signal bars. Pick yours and confirm the
-four-digit code the camera shows. That pairing is remembered across reboots, so
-this is a once-per-camera job.
+**Nearby** is a live list of what is in range, with signal bars. Pick yours and
+confirm the four-digit code the camera shows. That pairing is remembered across
+reboots, so this is a once-per-camera job.
 
 The list stays in the order cameras were first seen. It does not re-sort itself
 as signal changes — a list that reorders under your finger is worse than one
@@ -159,6 +182,33 @@ that is merely unsorted.
 
 If the camera you want is not listed, it is off, asleep, or already connected to
 a phone.
+
+#### More than one camera
+
+The module holds up to **four** cameras, and they appear above the Nearby list
+with a number on the right. **On power-up it connects to the first one in that
+order that is actually switched on** — so a Nano on the small quad and a 360 on
+the big one can both live on the same module, and you swap by switching one on
+and the other off rather than by opening this page.
+
+**Drag a card to change the order.** Top is 1. Put the camera you fly most at
+the top; it wins whenever both are on.
+
+Two things worth knowing:
+
+- **It never swaps mid-flight.** Once connected, that camera keeps the link
+  until it goes away. A higher-priority camera switching on later does not take
+  the link — ending a recording to satisfy a preference would be worse than
+  flying the camera you already have.
+- **Saving more cameras does not slow it down.** One scan sees every camera
+  that is switched on, and the module picks from that — it does not try them
+  one at a time, so four saved cameras connect as quickly as one.
+
+**Tap a card to forget that camera.** It asks first. Forgetting only removes it
+from this module — nothing on the camera itself changes — but to add it back it
+has to be switched on and in range again.
+
+Updating from a firmware that only held one camera keeps it, as the first entry.
 
 ### Recording
 
@@ -206,6 +256,68 @@ gestures:
   test button — the quickest way to confirm on the bench that the camera is
   paired and listening, without arming anything.
 - **A ten second hold** opens setup, as above.
+
+---
+
+### Post-roll
+
+**0 to 30 seconds. Off by default.**
+
+When the flight controller stops the recording — you disarm, or you crash — the
+camera carries on for this long before actually stopping. A crash disarms the
+quad, and the seconds you want are the ones *after* that: where it went, and
+what it landed on.
+
+Arming again during the countdown simply carries on recording, so it costs you
+nothing on a normal landing. The OSD counts down (`REC 5`, `REC 4`…) so you can
+see it happening rather than wondering why the camera is still running.
+
+*Post-roll* is what broadcast calls the padding at the tail of a recording. Its
+opposite — pre-roll, the seconds captured *before* the trigger — is something
+the camera itself can do, and is not wired up here yet.
+
+Pressing the module's button or your record switch stops **immediately**. This
+only ever delays the automatic stop, never you. It is also dropped the moment
+the flight controller link or the camera goes away — a dead UART still closes an
+open clip, exactly as before.
+
+---
+
+### Warnings
+
+**Warning** is an OSD field like any other — drag it onto a row of its own and
+put that row wherever you want it, the way a flight controller puts its warnings
+across the middle of the screen. It is blank space until something is wrong.
+
+If you have *not* given it a row, the state field carries warnings instead, so a
+module updating to this firmware does not silently lose them. Give warnings a
+row and the state field goes back to plain `REC` / `IDLE`.
+
+The module's LED also blinks fast when it has been asked to record and is not.
+The most important warning wins:
+
+| | Means |
+|---|---|
+| `NO SD` | No card, or the card is full. Nothing can be recorded. |
+| `CAM HOT` | Too hot to record. |
+| `NOT REC` | **You asked it to record and it is not.** |
+| `BAT LOW` | Camera battery at or below your threshold. |
+| `SD LOW` | Card time at or below your threshold. |
+
+It blinks rather than sitting there, and on the off-beat you still see whether
+it is recording — an alarm should not cost you the reading it is warning about.
+
+`NOT REC` waits three seconds before it appears. Starting a recording takes a
+Bluetooth round trip plus the camera's own shutter delay, and a warning that
+fired on every single arm is one you would stop reading.
+
+Nothing is ever warned about from a reading the camera has not confirmed. A
+camera that has gone quiet is not a camera that is refusing, and the state field
+already says `NO CAM` for that.
+
+**Warn below camera battery** and **Warn below card time left** set the last
+two. Either at zero switches that warning off. `NOT REC` has no threshold and
+cannot be switched off — it is the reason this module exists.
 
 ---
 
@@ -357,15 +469,28 @@ demo and stays under its original MIT licence. See [NOTICE](NOTICE).
 
 ## Status
 
-**1.0.0-beta1 — flown, and working as intended.**
+**1.1.0-beta1.** Read this in two halves, because they are not the same
+standard of evidence.
 
+**Flown, and working as intended** — everything that was in 1.0.0-beta1.
 Verified in the air on an Osmo Nano and an Osmo 360: pairing, live camera
 status, every record mode, the OSD, the AUX trigger as both a switch and a
 momentary button, and firmware updates with rollback proven on hardware.
 
-The one gap is hardware rather than behaviour — there is no Osmo Action camera
-here to test against. It speaks the same protocol as the Osmo 360, which has
-flown.
+**New in 1.1, and not yet flown.** All of it builds, and the logic is covered by
+host tests that compile the shipped source rather than a copy of it. None of it
+has been in the air:
+
+| | State |
+|---|---|
+| Warnings on the OSD and the LED | tested at a desk, not flown |
+| Keep recording after landing | tested at a desk, not flown |
+| More than one camera, in priority order | the list is host-tested; **the priority pick itself needs two cameras on a bench** |
+| Five more chips (S3, C6, C61, C5, ESP32) | they build and the images fit. **Nobody has bound a camera with one.** Only the C3 has flown |
+
+Two gaps are hardware rather than behaviour: there is no Osmo Action camera here
+to test against, and no board other than the C3 Supermini. The Action speaks the
+same protocol as the Osmo 360, which has flown.
 
 Found a problem? [Open an issue](../../issues).
 

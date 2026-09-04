@@ -1,5 +1,7 @@
 build/
 build-release/
+# One build directory per target, from CI and from local multi-target builds.
+build-ci/
 sdkconfig
 sdkconfig.old
 managed_components/

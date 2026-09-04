@@ -1,0 +1,105 @@
+# Build every supported chip, and run the host tests, on every push.
+#
+# This file lives inside theslate/ because that directory IS the published
+# repository: tools/publish.sh maps it to the repo root, so this lands at
+# .github/workflows/ci.yml where GitHub reads it. A workflow left BESIDE
+# theslate/ is dropped by the next publish and runs nowhere at all, which is
+# what happened to the first version of it.
+#
+# The point is not that the C3 still compiles -- that is noticed within a minute
+# of breaking it. It is that the other five targets have no hardware here and
+# nobody builds them by hand, so a change that breaks the S3 or the original
+# ESP32 would be found by whoever ported to it, months later, with no idea which
+# commit did it.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Seconds, no toolchain, and it covers the MSP framing, the CRCs, the DUML
+  # length rules, the switch window, the override state machine and the OSD
+  # formatter -- the last of which compiles the actual firmware source rather
+  # than a copy. Run first so a logic regression does not wait on six builds.
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tests
+        run: ./test/host/run_tests.sh
+
+  firmware:
+    runs-on: ubuntu-latest
+    needs: host-tests
+    strategy:
+      # Every target is reported, rather than the run stopping at the first
+      # failure. Knowing that three parts broke and three did not is most of
+      # the diagnosis.
+      fail-fast: false
+      matrix:
+        target: [esp32c3, esp32s3, esp32c6, esp32c61, esp32c5, esp32]
+    container: espressif/idf:v5.5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Built from the tracked defaults in a directory of its own, exactly as
+      # tools/release.sh does it -- never from a working sdkconfig, which is
+      # gitignored and holds whatever menuconfig was last used for. A CI build
+      # that differs from the release build checks the wrong thing.
+      # The IDF container runs as root while the checkout is owned by another
+      # uid, so git refuses to touch it -- "detected dubious ownership". The
+      # build calls git, so without this the first run fails on something that
+      # has nothing to do with the firmware.
+      - name: Let git use the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build ${{ matrix.target }}
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py -B "build-ci" -D SDKCONFIG="build-ci/sdkconfig.ci" \
+                 -D IDF_TARGET=${{ matrix.target }} build
+
+      # THE CHECK THIS WORKFLOW EXISTS FOR.
+      #
+      # The bench console can rebind the module to any MAC, drop its camera link
+      # and clear its BLE bonds. It lives outside the published tree and is off
+      # by default, and until now the only thing standing between it and a
+      # release was a grep inside publish.sh -- which runs when a human
+      # remembers to publish, not when the mistake is made.
+      - name: Refuse an image carrying the bench console
+        shell: bash
+        run: |
+          if grep -q '^CONFIG_CAMLINK_BENCH=y' build-ci/sdkconfig.ci; then
+            echo "::error::built WITH the bench console"; exit 1
+          fi
+          if grep -aq "BENCH CONSOLE ACTIVE" build-ci/slate.bin; then
+            echo "::error::the image contains the bench console"; exit 1
+          fi
+
+      # The partition table gives each app slot 1920 KB. An image that outgrows
+      # it does not fail to build -- it fails to flash, on somebody else's
+      # board. The C5 is the tightest at about 87%, so this has real margin to
+      # watch rather than being a formality.
+      - name: Check the image fits its OTA slot
+        shell: bash
+        run: |
+          SLOT=$((1920 * 1024))
+          SIZE=$(stat -c%s build-ci/slate.bin)
+          PCT=$((SIZE * 100 / SLOT))
+          echo "${{ matrix.target }}: $SIZE B — ${PCT}% of the ${SLOT} B slot"
+          echo "${{ matrix.target }}: $SIZE B (${PCT}% of the OTA slot)" >> $GITHUB_STEP_SUMMARY
+          if [ "$SIZE" -gt "$SLOT" ]; then
+            echo "::error::image does not fit the OTA slot"; exit 1
+          fi
+          if [ "$PCT" -gt 92 ]; then
+            echo "::warning::${PCT}% of the OTA slot used"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slate-${{ matrix.target }}
+          path: build-ci/slate.bin
+          retention-days: 14

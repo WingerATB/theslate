@@ -33,7 +33,7 @@ int main(void)
     {
         cam_status_t c = {0};
         c.connected = false;
-        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "NO CAM");
         EXPECT(1, ""); EXPECT(2, ""); EXPECT(3, "");
     }
@@ -54,7 +54,7 @@ int main(void)
         c.battery_valid     = true;  c.battery_pct     = 100;
         c.remain_time_valid = true;  c.remain_time_s   = 2699;
         c.temp_over_valid   = true;  c.temp_over       = 3;
-        camlink_format_osd(&c, true, true, 95, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 95, false, NULL, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "NO CAM");
         EXPECT(1, ""); EXPECT(2, ""); EXPECT(3, "");
     }
@@ -70,7 +70,7 @@ int main(void)
         cam_status_t c = {0};
         c.connected = true;              /* BLE has not given up yet */
         c.recording_valid = false;       /* ...but nothing has arrived */
-        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "NO CAM");
         EXPECT(1, ""); EXPECT(2, ""); EXPECT(3, "");
     }
@@ -84,7 +84,7 @@ int main(void)
         c.recording_valid = false;
         c.battery_pct = 87;   c.battery_valid = true;
         c.remain_time_s = 900; c.remain_time_valid = true;
-        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "NO CAM");
         EXPECT(1, ""); EXPECT(2, ""); EXPECT(3, "");
     }
@@ -99,7 +99,7 @@ int main(void)
         c.battery_pct = 87;        c.battery_valid = true;
         c.remain_time_s = 754;     c.remain_time_valid = true;   /* 12:34 */
         c.temp_over = 0;           c.temp_over_valid = true;
-        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "REC");
         EXPECT(1, "01:35");
         EXPECT(2, "BAT 87%");
@@ -116,7 +116,7 @@ int main(void)
         c.record_time_s = 5;   c.record_time_valid = true;
         c.battery_valid = false;                 /* 37 bytes received */
         c.remain_time_s = 3600; c.remain_time_valid = true;
-        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "REC");
         EXPECT(1, "00:05");
         EXPECT(2, "");                            /* blank, never "BAT 0%" */
@@ -131,26 +131,84 @@ int main(void)
         c.recording = false;   c.recording_valid = true;
         c.record_time_s = 42;  c.record_time_valid = true;
         c.battery_pct = 100;   c.battery_valid = true;
-        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "IDLE");
         EXPECT(1, "");
         EXPECT(2, "BAT 100%");
     }
 
-    /* 6. Overheating outranks the record state -- it explains why a clip is
-     *    not starting. */
-    printf("6. overheat\n");
+    /* 6. A warning takes the state slot on its ON phase and gives it back on
+     *    the OFF phase, so the pilot still sees what the camera is doing.
+     *
+     *    Overheating used to be tested inside the formatter. It is one entry in
+     *    the ladder now (test_warn.c owns the ladder itself); what is checked
+     *    here is only that a warning renders, and that it blinks rather than
+     *    parking on screen. */
+    printf("6. a warning blinks in the state slot\n");
     {
         cam_status_t c = {0};
         c.connected = true;
         c.recording = false; c.recording_valid = true;
-        c.temp_over = 2;     c.temp_over_valid = true;
-        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, out);
-        EXPECT(0, "CAM HOT");
 
-        c.temp_over = 1;     /* warning only: still record normally */
-        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_osd_extra_t on  = { .warn = CAM_WARN_HOT, .warn_on = true  };
+        camlink_osd_extra_t off = { .warn = CAM_WARN_HOT, .warn_on = false };
+
+        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, &on, out);
+        EXPECT(0, "CAM HOT");
+        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, &off, out);
         EXPECT(0, "IDLE");
+
+        /* Every warning must actually reach the screen, and must not disturb
+         * the row's width -- the default layout puts the liveness dot beside
+         * the state, so the row is padded to STATE(7) + space + DOT(1) = 9
+         * whatever the word is. A word over budget would push the dot right.
+         * The words' own lengths are checked in test_warn.c. */
+        for (int w = CAM_WARN_NONE + 1; w <= CAM_WARN_NO_SD; w++) {
+            camlink_osd_extra_t e = { .warn = (camlink_warn_t)w, .warn_on = true };
+            camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, &e, out);
+            const char *word = camlink_warn_word((camlink_warn_t)w);
+            if (strncmp(out[0], word, strlen(word)) != 0) {
+                printf("   FAIL: warning %d rendered \"%s\", wanted \"%s\"\n",
+                       w, out[0], word);
+                fails++;
+            }
+            if (strlen(out[0]) != 9) {
+                printf("   FAIL: warning %d moved the row width to %zu: \"%s\"\n",
+                       w, strlen(out[0]), out[0]);
+                fails++;
+            }
+        }
+    }
+
+    /* 6b. The setup gesture still outranks a warning. It is about to change
+     *     what the module IS, and the pilot has to see it land. */
+    printf("6b. setup outranks a warning\n");
+    {
+        cam_status_t c = {0};
+        c.connected = true;
+        c.recording = false; c.recording_valid = true;
+        camlink_osd_extra_t e = { .warn = CAM_WARN_NO_SD, .warn_on = true };
+        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_READY, &e, out);
+        EXPECT(0, "READY");
+    }
+
+    /* 6c. The stop-delay countdown. Still says REC, because it still is --
+     *     a camera recording after landing with nothing explaining it looks
+     *     exactly like a stop command that failed. */
+    printf("6c. stop-delay countdown\n");
+    {
+        cam_status_t c = {0};
+        c.connected = true;
+        c.recording = true;  c.recording_valid = true;
+        camlink_osd_extra_t e = { .stop_delay_s = 5 };
+        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, &e, out);
+        EXPECT(0, "REC 5");
+
+        /* A warning still outranks it: not recording at all matters more than
+         * how long a hold has left to run. */
+        e.warn = CAM_WARN_NO_SD; e.warn_on = true;
+        camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, &e, out);
+        EXPECT(0, "NO SD");
     }
 
     /* 7. Every slot must fit Betaflight's 16-char MAX_NAME_LENGTH. */
@@ -162,7 +220,7 @@ int main(void)
         c.record_time_s = 65535; c.record_time_valid = true;
         c.battery_pct = 100;     c.battery_valid = true;
         c.remain_time_s = 359999; c.remain_time_valid = true;
-        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, NULL, out);
         for (int i = 0; i < 4; i++) {
             if (strlen(out[i]) > 16) {
                 printf("  FAIL: slot %d is %zu chars (\"%s\"), max 16\n",
@@ -190,18 +248,18 @@ int main(void)
         cam_status_t c = {0};
         c.connected = true; c.recording_valid = true; c.recording = true;
 
-        camlink_format_osd(&c, true, true, 0, true, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, true, NULL, CAMLINK_SETUP_NONE, NULL, out);
         if (out[0][dot] != '.') { printf("   FAIL: dot missing\n"); fails++; }
         if (strncmp(out[0], "REC", 3) != 0) { printf("   FAIL: state clobbered\n"); fails++; }
 
-        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, NULL, out);
         if (out[0][dot] != ' ') { printf("   FAIL: dot stuck on\n"); fails++; }
         if (strncmp(out[0], "REC", 3) != 0) { printf("   FAIL: state clobbered\n"); fails++; }
 
         /* Longest state string must still leave the dot its column. */
         cam_status_t d = {0};
         d.connected = false;
-        camlink_format_osd(&d, true, false, 0, true, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&d, true, false, 0, true, NULL, CAMLINK_SETUP_NONE, NULL, out);
         if (out[0][dot] != '.') { printf("   FAIL: no dot on NO CAM\n"); fails++; }
         if (strncmp(out[0], "NO CAM", 6) != 0) { printf("   FAIL: NO CAM clobbered\n"); fails++; }
         if ((int)strlen(out[0]) != dot + 1) { printf("   FAIL: slot 0 width\n"); fails++; }
@@ -211,7 +269,7 @@ int main(void)
     {
         cam_status_t c = {0};
         c.connected = false;               /* worst case: nothing known */
-        camlink_format_osd(&c, false, false, 0, false, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, false, false, 0, false, NULL, CAMLINK_SETUP_NONE, NULL, out);
         for (int i = 0; i < 4; i++) {
             if (out[i][0] == '\0') {
                 printf("  FAIL: slot %d is empty -- FC would render CUSTOM_MSG%d\n",

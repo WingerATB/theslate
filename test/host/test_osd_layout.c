@@ -58,7 +58,7 @@ int main(void)
     printf("2. the default layout renders as it always did\n");
     {
         cam_status_t c = live();
-        camlink_format_osd(&c, true, true, 0, true, NULL, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, true, NULL, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "REC     ."); EXPECT(1, "12:34  ");
         EXPECT(2, "BAT 87% ");   EXPECT(3, "SD 1H49 ");
     }
@@ -71,7 +71,7 @@ int main(void)
             { 0, 0, 0, 0 }, { 0, 0, 0, 0 },
         };
         cam_status_t c = live();
-        camlink_format_osd(&c, true, true, 0, true, l, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, true, l, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "REC     12:34  ");   /* 7 + sep + 7 */
         EXPECT(1, "87%  1H49  .");      /* 4 + sep + 5 + sep + 1 */
         EXPECT(2, " ");
@@ -86,7 +86,7 @@ int main(void)
         };
         cam_status_t c = live();
         c.recording = false;            /* clip time is not a thing right now */
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, NULL, out);
         /* Battery must stay in the same columns it occupies while recording,
          * otherwise it walks left and right as clips start and stop. */
         EXPECT(0, "        BAT 87% ");
@@ -103,7 +103,7 @@ int main(void)
         c.connected = true;             /* BLE has not given up yet... */
         c.recording_valid = false;      /* ...but nothing is arriving */
         c.battery_pct = 87; c.battery_valid = true;   /* stale, must not show */
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "        ");
         EXPECT(1, "         NO CAM ");
     }
@@ -114,7 +114,7 @@ int main(void)
             { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 },
         };
         cam_status_t c = live();
-        camlink_format_osd(&c, true, true, 0, true, l, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, true, l, CAMLINK_SETUP_NONE, NULL, out);
         for (int r = 0; r < 4; r++) {
             CHECK(out[r][0] != '\0', "row %d is empty -- Betaflight would print "
                   "CUSTOM_MSG%d instead of hiding it", r, r + 1);
@@ -131,7 +131,7 @@ int main(void)
             { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 },
         };
         cam_status_t c = live();
-        camlink_format_osd(&c, true, true, 0, true, l, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, true, l, CAMLINK_SETUP_NONE, NULL, out);
         for (int r = 0; r < 4; r++) {
             CHECK((int)strlen(out[r]) <= OSD_ROW_MAX, "row %d is %d chars, limit %d",
                   r, (int)strlen(out[r]), OSD_ROW_MAX);
@@ -147,11 +147,14 @@ int main(void)
             { 0, 0, 0, 0 },
         };
         cam_status_t c = live();
-        c.temp_over = 3;          c.temp_over_valid = true;   /* "CAM HOT" */
         c.record_time_s = 65535;  /* 1092:15 */
         c.battery_pct = 100;      /* "BAT 100%" */
         c.remain_time_s = 359999; /* "SD 99H59" */
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
+        /* The widest thing the state slot can hold is a warning word, not a
+         * record state -- overheating moved into the ladder, so it arrives
+         * through `extra` now rather than being read off temp_over here. */
+        camlink_osd_extra_t hot = { .warn = CAM_WARN_HOT, .warn_on = true };
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, &hot, out);
         EXPECT(0, "CAM HOT 1092:15");
         EXPECT(1, "BAT 100%");
         EXPECT(2, "SD 99H59");
@@ -168,7 +171,7 @@ int main(void)
         };
         cam_status_t c = live();
         strcpy(c.label, "O360");
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "O360 REC    ");
 
         /* A camera that has gone quiet takes its name with it. Every other
@@ -177,13 +180,13 @@ int main(void)
         cam_status_t g = {0};
         g.connected = true; g.recording_valid = false;
         strcpy(g.label, "O360");
-        camlink_format_osd(&g, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&g, true, true, 0, false, l, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "     NO CAM ");
 
         /* An unrecognised camera still renders something. */
         cam_status_t u = live();
         u.label[0] = '\0';
-        camlink_format_osd(&u, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&u, true, true, 0, false, l, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "CAM  REC    ");
     }
 
@@ -196,20 +199,20 @@ int main(void)
         };
         cam_status_t c = live();
 
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_ARMING, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_ARMING, NULL, out);
         EXPECT(0, "ENTER    ");
         /* Everything else carries on: those readings are still true, and still
          * worth having while deciding whether to commit. */
         EXPECT(1, "BAT 87% ");
 
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_READY, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_READY, NULL, out);
         EXPECT(0, "READY    ");
 
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_ENTERING, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_ENTERING, NULL, out);
         EXPECT(0, "CONFIG   ");
 
         /* Abandoning the gesture puts the state slot straight back. */
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "REC      ");
     }
 
@@ -222,13 +225,13 @@ int main(void)
             { OSD_F_STATE, 0, 0, 0 }, { 0,0,0,0 }, { 0,0,0,0 }, { 0,0,0,0 },
         };
         cam_status_t c = {0};
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, NULL, out);
         EXPECT(0, "NO CAM ");
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_ARMING, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_ARMING, NULL, out);
         EXPECT(0, "ENTER  ");
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_READY, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_READY, NULL, out);
         EXPECT(0, "READY  ");
-        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_ENTERING, out);
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_ENTERING, NULL, out);
         EXPECT(0, "CONFIG ");
     }
 
@@ -239,6 +242,83 @@ int main(void)
             CHECK(strlen(w[i]) <= osd_fields[OSD_F_STATE].width,
                   "\"%s\" is %zu chars, budget is %u", w[i], strlen(w[i]),
                   osd_fields[OSD_F_STATE].width);
+    }
+
+    /* 13-16: the Warning field. */
+    printf("13. a Warning field takes the warnings off the state slot\n");
+    {
+        const uint8_t l[OSD_ROWS][OSD_ROW_FIELDS] = {
+            { OSD_F_STATE, 0, 0, 0 },
+            { OSD_F_WARN,  0, 0, 0 },
+            { 0, 0, 0, 0 },
+            { 0, 0, 0, 0 },
+        };
+        cam_status_t c = live();
+        c.recording = true; c.recording_valid = true;
+        camlink_osd_extra_t e = { .warn = CAM_WARN_NOT_REC, .warn_on = true };
+
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, &e, out);
+        EXPECT(0, "REC    ");    /* the state says what it is doing, padded to 7 */
+        EXPECT(1, "NOT REC");    /* and the warning has a row of its own */
+
+        /* Off phase: the warning row blanks, and the state does NOT start
+         * carrying it -- the row is where warnings live now. */
+        e.warn_on = false;
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, &e, out);
+        EXPECT(0, "REC    ");
+        EXPECT(1, "       ");   /* seven spaces: the row holds its width */
+    }
+
+    printf("14. with no Warning field, the state slot still carries them\n");
+    {
+        /* A module updating to this firmware has a stored layout with no
+         * Warning field in it. It must keep showing warnings rather than
+         * silently losing them until somebody opens the settings page. */
+        const uint8_t l[OSD_ROWS][OSD_ROW_FIELDS] = {
+            { OSD_F_STATE, 0, 0, 0 },
+            { OSD_F_CLIP,  0, 0, 0 },
+            { 0, 0, 0, 0 },
+            { 0, 0, 0, 0 },
+        };
+        cam_status_t c = live();
+        c.recording = true; c.recording_valid = true;
+        camlink_osd_extra_t e = { .warn = CAM_WARN_NO_SD, .warn_on = true };
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, &e, out);
+        EXPECT(0, "NO SD  ");
+    }
+
+    printf("15. a Warning field is blank space when nothing is wrong\n");
+    {
+        /* It holds its width rather than collapsing, or everything sharing its
+         * row walks sideways the moment a warning clears. */
+        const uint8_t l[OSD_ROWS][OSD_ROW_FIELDS] = {
+            { OSD_F_WARN, OSD_F_DOT, 0, 0 },
+            { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 },
+        };
+        cam_status_t c = live();
+        c.recording = true; c.recording_valid = true;
+        camlink_osd_extra_t e = { .warn = CAM_WARN_NONE, .warn_on = true };
+        camlink_format_osd(&c, true, true, 0, true, l, CAMLINK_SETUP_NONE, &e, out);
+        EXPECT(0, "        .");      /* seven spaces, separator, dot */
+
+        e.warn = CAM_WARN_HOT;
+        camlink_format_osd(&c, true, true, 0, true, l, CAMLINK_SETUP_NONE, &e, out);
+        EXPECT(0, "CAM HOT .");
+    }
+
+    printf("16. the setup gesture still outranks the state, warning row or not\n");
+    {
+        const uint8_t l[OSD_ROWS][OSD_ROW_FIELDS] = {
+            { OSD_F_STATE, 0, 0, 0 },
+            { OSD_F_WARN,  0, 0, 0 },
+            { 0, 0, 0, 0 }, { 0, 0, 0, 0 },
+        };
+        cam_status_t c = live();
+        c.recording = true; c.recording_valid = true;
+        camlink_osd_extra_t e = { .warn = CAM_WARN_NOT_REC, .warn_on = true };
+        camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_READY, &e, out);
+        EXPECT(0, "READY  ");    /* the gesture owns the state slot */
+        EXPECT(1, "NOT REC");    /* and the warning is still reported */
     }
 
     printf(fails ? "\n%d FAILURE(S)\n" : "\nALL PASS (%d failures)\n", fails);

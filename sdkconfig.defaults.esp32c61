@@ -1,0 +1,7 @@
+# ESP32-C61. Shares the C6's Bluetooth controller, and therefore its -15 dBm
+# floor -- see the note in sdkconfig.defaults.esp32c6.
+#
+# Preview: C61 support landed properly in ESP-IDF v6.0. It builds on v5.5.
+# Console on the native USB Serial/JTAG peripheral, so UART1 (the FC link) and
+# UART0 both stay free.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

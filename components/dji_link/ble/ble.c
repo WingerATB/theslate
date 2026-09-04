@@ -18,6 +18,7 @@
  */
 
 #include <string.h>
+#include <limits.h>
 #include "ble.h"
 #include "custom_crc16.h"
 #include "custom_crc32.h"
@@ -28,6 +29,7 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_bt.h"
+#include "board.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gattc_api.h"
 #include "esp_bt_main.h"
@@ -113,6 +115,25 @@ static uint8_t s_best_addr_type = BLE_ADDR_TYPE_PUBLIC;
 static int8_t best_rssi = -128;         // Store the RSSI value of the device with the strongest signal, initialized to the weakest signal strength
 static bool s_is_reconnecting = false;  // Whether in reconnection mode
 static bool s_found_previous_device = false;  // Whether the original device was found in reconnection mode
+
+/* SLATE ADDITION: the cameras we may connect to, in priority order.
+ *
+ * best_pri is the index of the best one seen so far in this scan window; a
+ * lower index beats any signal strength, and best_rssi only separates repeated
+ * adverts from the same camera. See the note on ble_set_bound_list() in ble.h
+ * for why the ranking happens inside one scan rather than across several. */
+static uint8_t s_bound_list[BLE_BOUND_MAX][6];
+static int     s_bound_n   = 0;
+static int     best_pri    = INT_MAX;
+
+/* Index of this address in the bound list, or -1. */
+static int bound_index_of(const uint8_t *bda)
+{
+    for (int i = 0; i < s_bound_n; i++) {
+        if (memcmp(s_bound_list[i], bda, 6) == 0) return i;
+    }
+    return -1;
+}
 
 /* Only one profile is stored */
 /* 仅存一个 profile */
@@ -250,22 +271,24 @@ static void trigger_scan_task(void) {
 
 /* ===================== SLATE ADDITION ===================================
  * Minimum-TX-power helpers. Kept together so the deviation from the upstream
- * DJI demo is easy to audit. ESP_PWR_LVL_N24 == -24 dBm is the lowest level
- * the ESP32-C3 supports (esp_bt.h: ESP_PWR_LVL_N24 = 0).
+ * DJI demo is easy to audit.
+ *
+ * The levels themselves are NOT named here any more. ESP_PWR_LVL_N24 is the
+ * floor on the C3 and does not exist at all on a C6, whose radio stops at
+ * -15 dBm, and the enum's numeric values differ between parts for the same
+ * dBm. Naming a level in this file made it a C3 file. board_tx_*() owns the
+ * per-part ladder; this only ever asks for a rung.
  * ========================================================================= */
 #if   defined(CONFIG_CAMLINK_TX_N12)
-#define CAMLINK_TX_LVL  ESP_PWR_LVL_N12
-#define CAMLINK_TX_NAME "-12 dBm"
+#define CAMLINK_TX_RUNG  1
 #elif defined(CONFIG_CAMLINK_TX_N0)
-#define CAMLINK_TX_LVL  ESP_PWR_LVL_N0
-#define CAMLINK_TX_NAME "0 dBm"
+#define CAMLINK_TX_RUNG  2
 #elif defined(CONFIG_CAMLINK_TX_P3)
-#define CAMLINK_TX_LVL  ESP_PWR_LVL_P3
-#define CAMLINK_TX_NAME "+3 dBm"
+#define CAMLINK_TX_RUNG  3
 #else
-#define CAMLINK_TX_LVL  ESP_PWR_LVL_N24
-#define CAMLINK_TX_NAME "-24 dBm"
+#define CAMLINK_TX_RUNG  0        /* quietest the part has -- the flight level */
 #endif
+#define CAMLINK_TX_LVL   board_tx_level(CAMLINK_TX_RUNG)
 
 /* Runtime override. The Kconfig choice stays the first-boot default, but the
  * level a user actually needs differs between the bench (loud enough to make a
@@ -273,21 +296,30 @@ static void trigger_scan_task(void) {
  * ELRS receiver), and forcing a reflash to move between them is exactly the
  * kind of extra work the settings page exists to remove. Set before ble_init();
  * the controller must be enabled before it takes effect on the hardware. */
-static esp_power_level_t s_tx_lvl = CAMLINK_TX_LVL;
+/* -1 until something asks, then the compiled-in rung resolved through the
+ * ladder. It cannot be a static initialiser any more: board_tx_level() is a
+ * function call, and no single named level is valid on every part. -1 is safe
+ * as "unset" because every level in the enum is non-negative. */
+static int s_tx_lvl = -1;
 
-/* The level actually in force, not the one compiled in. CAMLINK_TX_NAME is a
- * Kconfig string, so logging it after a runtime override reported the build's
- * default while the radio ran at something else -- a status line that is
- * confidently wrong, which is the one thing this project does not do. */
+static esp_power_level_t tx_lvl(void)
+{
+    if (s_tx_lvl < 0) s_tx_lvl = CAMLINK_TX_LVL;
+    return (esp_power_level_t)s_tx_lvl;
+}
+
+/* The level actually in force, not the one compiled in. The Kconfig choice is
+ * only a first-boot default, and logging it after a runtime override reported
+ * the build's default while the radio ran at something else -- a status line
+ * that is confidently wrong, which is the one thing this project does not do.
+ */
+/* Was a switch over four named levels, which does not survive a change of
+ * part: on the original ESP32 ESP_PWR_LVL_N14 is an ALIAS for N12, so two
+ * cases collapse onto one value and the switch will not compile. The ladder
+ * answers by value instead. */
 static const char *tx_lvl_name(esp_power_level_t l)
 {
-    switch (l) {
-    case ESP_PWR_LVL_N24: return "-24 dBm";
-    case ESP_PWR_LVL_N12: return "-12 dBm";
-    case ESP_PWR_LVL_N0:  return "0 dBm";
-    case ESP_PWR_LVL_P3:  return "+3 dBm";
-    default:              return "(other)";
-    }
+    return board_tx_level_name((int)l);
 }
 
 /* Drop every stored BLE bond.
@@ -309,10 +341,19 @@ void camlink_ble_clear_bonds(void)
     free(list);
 }
 
+/* Bounds come from the ladder. A hard-coded ESP_PWR_LVL_N24 floor is both
+ * absent on some parts and wrong on others -- on the ESP32 that name does not
+ * exist, and on the C6 it would admit a level the radio cannot produce. */
+static bool tx_level_ok(int lvl)
+{
+    return lvl >= board_tx_level(0) &&
+           lvl <= board_tx_level((uint8_t)(board_tx_count() - 1));
+}
+
 void camlink_ble_set_tx_level(int lvl)
 {
-    if (lvl < ESP_PWR_LVL_N24 || lvl > ESP_PWR_LVL_P9) return;
-    s_tx_lvl = (esp_power_level_t)lvl;
+    if (!tx_level_ok(lvl)) return;
+    s_tx_lvl = lvl;
 }
 
 /* Change transmit power on a live link.
@@ -325,20 +366,20 @@ void camlink_ble_set_tx_level(int lvl)
  * else in a flight log. */
 void camlink_ble_apply_tx_level(int lvl)
 {
-    if (lvl < ESP_PWR_LVL_N24 || lvl > ESP_PWR_LVL_P9) return;
-    s_tx_lvl = (esp_power_level_t)lvl;
+    if (!tx_level_ok(lvl)) return;
+    s_tx_lvl = lvl;
 
-    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, s_tx_lvl);
-    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV,     s_tx_lvl);
-    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN,    s_tx_lvl);
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, tx_lvl());
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV,     tx_lvl());
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN,    tx_lvl());
     if (s_ble_profile.connection_status.is_connected) {
-        esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, s_tx_lvl);
+        esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, tx_lvl());
     }
 }
 
 void camlink_ble_set_min_tx_power_static(void)
 {
-    const esp_power_level_t lvl = s_tx_lvl;
+    const esp_power_level_t lvl = tx_lvl();
     struct { esp_ble_power_type_t t; const char *n; } types[] = {
         { ESP_BLE_PWR_TYPE_DEFAULT, "DEFAULT" },
         { ESP_BLE_PWR_TYPE_ADV,     "ADV"     },
@@ -356,11 +397,11 @@ void camlink_ble_set_min_tx_power_static(void)
 
 void camlink_ble_set_min_tx_power_conn(void)
 {
-    esp_err_t e = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, s_tx_lvl);
+    esp_err_t e = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, tx_lvl());
     if (e != ESP_OK) {
-        ESP_LOGW(TAG, "TX power CONN_HDL0 -> %s failed: %s", tx_lvl_name(s_tx_lvl), esp_err_to_name(e));
+        ESP_LOGW(TAG, "TX power CONN_HDL0 -> %s failed: %s", tx_lvl_name(tx_lvl()), esp_err_to_name(e));
     } else {
-        ESP_LOGI(TAG, "TX power CONN_HDL0 set to %s", tx_lvl_name(s_tx_lvl));
+        ESP_LOGI(TAG, "TX power CONN_HDL0 set to %s", tx_lvl_name(tx_lvl()));
     }
 }
 
@@ -588,6 +629,7 @@ esp_err_t ble_start_scanning_and_connect(void) {
     // 重置扫描相关变量
     memset(best_addr, 0, sizeof(esp_bd_addr_t));
     best_rssi = -128;
+    best_pri  = INT_MAX;   /* SLATE: nothing chosen yet this window */
     memset(s_remote_device_name, 0, ESP_BLE_ADV_NAME_LEN_MAX);
     s_is_reconnecting = false;
     s_found_previous_device = false;
@@ -1039,18 +1081,42 @@ static uint8_t s_write_candidate_idx;
 static esp_bd_addr_t s_bound_addr;
 static bool          s_have_bound;
 
+void ble_set_bound_list(const uint8_t (*addrs)[6], int n)
+{
+    if (addrs == NULL || n <= 0) {
+        s_bound_n = 0;
+        s_have_bound = false;
+        ESP_LOGI(TAG, "no cameras bound -- will connect to nothing");
+        return;
+    }
+    if (n > BLE_BOUND_MAX) n = BLE_BOUND_MAX;
+    for (int i = 0; i < n; i++) memcpy(s_bound_list[i], addrs[i], 6);
+    s_bound_n = n;
+    s_have_bound = true;
+
+    /* Kept in step for the reconnect path, which still works from one address. */
+    memcpy(s_bound_addr, addrs[0], sizeof(s_bound_addr));
+
+    for (int i = 0; i < n; i++) {
+        ESP_LOGI(TAG, "camera %d: %02X:%02X:%02X:%02X:%02X:%02X", i + 1,
+                 addrs[i][0], addrs[i][1], addrs[i][2],
+                 addrs[i][3], addrs[i][4], addrs[i][5]);
+    }
+}
+
 void ble_set_bound_addr(const uint8_t *addr)
 {
-    if (addr == NULL) {
-        s_have_bound = false;
-        memset(s_bound_addr, 0, sizeof(s_bound_addr));
-        ESP_LOGI(TAG, "bind cleared -- will accept the nearest camera");
-    } else {
-        memcpy(s_bound_addr, addr, sizeof(s_bound_addr));
-        s_have_bound = true;
-        ESP_LOGI(TAG, "bound to %02X:%02X:%02X:%02X:%02X:%02X",
-                 addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-    }
+    if (addr == NULL) { ble_set_bound_list(NULL, 0); return; }
+    uint8_t one[1][6];
+    memcpy(one[0], addr, 6);
+    ble_set_bound_list(one, 1);
+}
+
+bool ble_get_selected_addr(uint8_t out[6])
+{
+    if (out == NULL || best_pri == INT_MAX) return false;
+    memcpy(out, best_addr, 6);
+    return true;
 }
 
 bool ble_has_bound_addr(void) { return s_have_bound; }
@@ -1258,11 +1324,20 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                     s_best_addr_type = r->scan_rst.ble_addr_type;
                     ESP_LOGI(TAG, "Found previous device: %s, RSSI: %d", adv_name_str, r->scan_rst.rssi);
                 }
-            } else if (s_have_bound) {
-                /* CAMLINK: bound to a specific camera -- ignore every other
-                 * one, however loud. */
-                if (memcmp(s_bound_addr, r->scan_rst.bda, sizeof(esp_bd_addr_t)) == 0 &&
-                    r->scan_rst.rssi > best_rssi) {
+            } else if (s_bound_n > 0) {
+                /* CAMLINK: one of OUR cameras, ranked by priority -- ignore
+                 * every other one, however loud.
+                 *
+                 * Signal strength deliberately does not compete with priority.
+                 * The user said which camera they would rather fly; a nearer
+                 * one being louder is not an argument against that. RSSI only
+                 * separates two adverts from the SAME camera, where a stronger
+                 * one is simply a better sample of the same choice. */
+                int pri = bound_index_of(r->scan_rst.bda);
+                if (pri >= 0 &&
+                    (pri < best_pri ||
+                     (pri == best_pri && r->scan_rst.rssi > best_rssi))) {
+                    best_pri  = pri;
                     best_rssi = r->scan_rst.rssi;
                     memcpy(best_addr, r->scan_rst.bda, sizeof(esp_bd_addr_t));
                     s_best_addr_type = r->scan_rst.ble_addr_type;

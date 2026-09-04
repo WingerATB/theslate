@@ -1,0 +1,11 @@
+# ESP32-C6.
+#
+# Builds and links. One thing about it is a real behaviour change rather than
+# housekeeping: ITS RADIO DOES NOT GO AS QUIET AS THE C3'S. The floor is
+# -15 dBm where the C3 reaches -24 dBm -- ESP_PWR_LVL_N24 does not exist in its
+# header at all -- so the quietest rung on this part is 9 dB louder than what
+# flies today. board.c carries the shorter ladder; the link budget next to the
+# receiver has to be re-checked in the frame rather than assumed to carry over.
+# Console on the native USB Serial/JTAG peripheral, so UART1 (the FC link) and
+# UART0 both stay free.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

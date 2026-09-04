@@ -15,6 +15,7 @@
 #include <stddef.h>
 
 #include "osd_fields.h"
+#include "camlink_warn.h"
 
 /* --------------------------------------------------------------------------
  * Camera status, as far as we are willing to trust it.
@@ -124,6 +125,35 @@ void camlink_get_osd(char out[4][17]);
 /* Logic task body: runs the record state machine and pushes OSD text. */
 void camlink_logic_task(void *arg);
 
+/* The warning currently in force, for the front-panel LED.
+ *
+ * The OSD is the real report and says far more than one LED can. This exists
+ * for the bench, where there are no goggles: a module that is powered, paired
+ * and quietly not recording looks exactly like one that is working. */
+camlink_warn_t camlink_get_warn(void);
+
+/* What the state slot has to say beyond REC / IDLE.
+ *
+ * Passed in rather than derived, because both fields need a clock the
+ * formatter deliberately does not have: the warning needs a grace period and
+ * the countdown needs a deadline. Keeping time out of the renderer is what
+ * lets the host tests drive it. NULL is legal and means neither. */
+typedef struct {
+    camlink_warn_t warn;
+    /* Warnings blink, and blink FASTER than the liveness dot -- two things
+     * flashing at the same rate in the same corner read as one thing. On the
+     * off phase the slot shows the normal state, so the pilot still sees
+     * whether it is recording rather than losing that to the alarm. */
+    bool           warn_on;
+    /* Seconds still being held after an automatic stop. Rendered as "REC 5",
+     * because a camera that carries on recording after landing with nothing
+     * on screen explaining it looks exactly like a stop that failed. */
+    uint8_t        stop_delay_s;
+    /* Set by the renderer, not by the caller: true when the layout has no
+     * Warning field, so the state slot has to carry warnings itself. */
+    bool           warn_in_state;
+} camlink_osd_extra_t;
+
 /* Exposed for testing the formatter without an FC attached. */
 /* heartbeat: draw the liveness dot this frame, or not. Toggled by the caller
  * once a second. See the note on the dot in osd_format.c -- it must be driven
@@ -133,6 +163,7 @@ void camlink_format_osd(const cam_status_t *cam, bool msp_link_up,
                         bool heartbeat,
                         const uint8_t layout[OSD_ROWS][OSD_ROW_FIELDS],
                         camlink_setup_hint_t setup,
+                        const camlink_osd_extra_t *extra,
                         char out[4][17]);
 
 #endif /* CAMLINK_H */

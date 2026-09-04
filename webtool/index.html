@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Flash The Slate</title>
+<meta name="description" content="Install SlateFPV firmware from your browser. No toolchain, no downloads.">
+<style>
+/* Deliberately the same vocabulary as the module's own settings page: a user
+   meets this tool first and that page five minutes later, and they should not
+   look like two different products. */
+:root{
+  --bg:#fbfbfa; --surface:#f4f4f2; --ink:#14171c; --ink-2:#5b636e;
+  --line:#e3e3e0; --line-2:#c9c9c4; --on-ink:#fbfbfa;
+  --ok:#0f8a4a; --warn:#a35c00; --bad:#a3201c;
+}
+@media (prefers-color-scheme:dark){
+  :root{ --bg:#14171c; --surface:#1c2027; --ink:#f0f0ee; --ink-2:#9aa2ad;
+         --line:#2a2f38; --line-2:#3a414c; --on-ink:#14171c;
+         --ok:#4ec27f; --warn:#e0a355; --bad:#e0716d; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:640px;margin:0 auto;padding:32px 20px 64px}
+h1{font-size:26px;letter-spacing:-.02em;margin:0 0 6px}
+.lede{color:var(--ink-2);margin:0 0 28px}
+section{border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:16px;
+  background:var(--bg)}
+h2{font-size:13px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-2);
+  margin:0 0 14px;font-weight:600}
+button{font:inherit;font-weight:600;border-radius:10px;padding:12px 18px;cursor:pointer;
+  background:var(--ink);color:var(--on-ink);border:1px solid var(--ink)}
+button.ghost{background:transparent;color:var(--ink);border-color:var(--line-2)}
+button[disabled]{opacity:.4;cursor:not-allowed}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.note{color:var(--ink-2);font-size:14px;margin-top:12px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}
+.hide{display:none!important}
+.pill{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line-2);
+  border-radius:999px;padding:5px 12px;font-size:13px;font-weight:600}
+.pill.ok{border-color:var(--ok);color:var(--ok)}
+.pill.bad{border-color:var(--bad);color:var(--bad)}
+.bar{height:8px;border-radius:999px;background:var(--surface);overflow:hidden;margin-top:14px}
+.bar i{display:block;height:100%;width:0;background:var(--ink);transition:width .18s}
+.log{background:var(--surface);border-radius:10px;padding:12px 14px;margin-top:14px;
+  max-height:210px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:12px;line-height:1.5;white-space:pre-wrap;color:var(--ink-2)}
+.warn{border:1px solid var(--warn);border-radius:11px;padding:14px 16px;margin-bottom:16px}
+.warn b{color:var(--warn)}
+label.opt{display:flex;gap:12px;align-items:flex-start;padding:13px;border:1px solid var(--line);
+  border-radius:11px;margin-bottom:9px;cursor:pointer}
+label.opt.on{border-color:var(--ink);background:var(--surface)}
+label.opt input{margin-top:3px;accent-color:var(--ink)}
+label.opt .t{font-weight:600}
+label.opt .d{color:var(--ink-2);font-size:14px}
+a{color:inherit}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Flash The Slate</h1>
+<p class="lede">Plug the module into this computer and press one button. It works
+out which chip is on your board and installs the right firmware — there is
+nothing to download and nothing to choose.</p>
+
+<!-- The battery warning comes FIRST and outside any flow, because it is the one
+     mistake here that damages hardware rather than merely failing. -->
+<div class="warn">
+  <b>Take the flight battery out first.</b> The module's 5&nbsp;V pin is wired to
+  the flight controller, so a USB cable back-feeds the FC, the VTX and everything
+  else on that rail. Two supplies through one wire is how regulators die.
+</div>
+
+<section id="unsupported" class="hide">
+  <h2>This browser cannot do it</h2>
+  <p>Flashing over USB needs <b>Web Serial</b>, which only Chrome and Edge have.
+  Safari and Firefox have never shipped it, and no setting turns it on.</p>
+  <p class="note">Open this page in Chrome or Edge on a desktop computer. Phones
+  cannot do it either — Android Chrome has no Web Serial, and iOS has no USB.</p>
+</section>
+
+<section id="main">
+  <h2>1 &nbsp;What to install</h2>
+
+  <label class="opt on" id="optFullLabel">
+    <input type="radio" name="mode" value="full" checked>
+    <span>
+      <span class="t">First time, or recovery</span><br>
+      <span class="d">Installs everything. <b>Erases your settings</b> — the
+      cameras you have saved, the record mode, the OSD layout. Use this on a new
+      board, or when one has stopped working.</span>
+    </span>
+  </label>
+
+  <label class="opt" id="optUpdLabel">
+    <input type="radio" name="mode" value="update">
+    <span>
+      <span class="t">Update</span><br>
+      <span class="d">Installs the new firmware and <b>keeps your settings</b>.
+      Use this on a module that already works. You can also do this from your
+      phone over Wi&#8209;Fi, with no cable at all.</span>
+    </span>
+  </label>
+
+  <div class="note" id="verLine"></div>
+</section>
+
+<section>
+  <h2>2 &nbsp;Connect and flash</h2>
+  <div class="row">
+    <button id="go">Connect</button>
+    <span id="chipPill" class="pill hide"></span>
+  </div>
+  <div class="bar hide" id="barWrap"><i id="bar"></i></div>
+  <div class="note" id="status">Chrome will ask which device to use. The module
+    usually appears as <span class="mono">USB JTAG/serial debug unit</span> or a
+    <span class="mono">USB Serial</span> port.</div>
+  <div class="log hide" id="log"></div>
+</section>
+
+<section>
+  <h2>If no device appears</h2>
+  <p class="note" style="margin-top:0">Hold the module's <b>BOOT</b> button, tap
+  <b>RESET</b>, then let go of BOOT, and press Connect again. Some boards need
+  that the first time. A cable that only carries power and not data will also
+  show nothing — if the board never appears in any app, try another cable.</p>
+</section>
+
+<p class="note" id="src"></p>
+
+</div>
+
+<script type="module">
+import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.6.1/+esm";
+
+const $ = s => document.querySelector(s);
+const logBox = $('#log');
+const say = m => {
+  logBox.classList.remove('hide');
+  logBox.textContent += m + "\n";
+  logBox.scrollTop = logBox.scrollHeight;
+};
+
+/* Web Serial or nothing. Checked before anything else is shown, because the
+   alternative is a Connect button that does nothing and no explanation. */
+if (!('serial' in navigator)) {
+  $('#unsupported').classList.remove('hide');
+  $('#main').classList.add('hide');
+  $('#go').disabled = true;
+  $('#status').textContent = 'This browser has no Web Serial.';
+}
+
+/* ESP-IDF names every chip in its image header, and an image only boots on the
+   chip it was built for -- both the bootloader and the module's own updater
+   refuse a mismatch. So the tool asks the board what it is rather than asking
+   the person holding it.
+
+   Names are esptool-js's CHIP_NAME, read straight from its target classes. */
+const CHIPS = {
+  'ESP32-C3':  'esp32c3',
+  'ESP32-S3':  'esp32s3',
+  'ESP32-C6':  'esp32c6',
+  'ESP32-C61': 'esp32c61',
+  'ESP32-C5':  'esp32c5',
+  'ESP32':     'esp32',
+};
+
+/* Parts that connect happily and then cannot run this firmware. Refused BY NAME,
+   with the reason, because "it flashed and then did nothing" is the worst
+   possible outcome and the one silence produces. */
+const REFUSED = {
+  'ESP32-C2': 'The C2 has 272 KB of RAM and this firmware needs both radios up ' +
+              'at once during setup. It would flash and then run out of memory.',
+  'ESP32-S2': 'The S2 has no Bluetooth radio at all, so it cannot talk to a camera.',
+  'ESP32-H2': 'The H2 has no Wi-Fi, so the settings page could never come up.',
+  'ESP32-P4': 'The P4 has no radios at all.',
+};
+
+let manifest = null;
+fetch('manifest.json', {cache: 'no-store'})
+  .then(r => r.json())
+  .then(m => {
+    manifest = m;
+    const n = Object.keys(m.targets || {}).length;
+    $('#verLine').textContent =
+      `Firmware ${m.version} — ${n} board${n === 1 ? '' : 's'} supported.`;
+    $('#src').innerHTML =
+      'Firmware and this page are built together from ' +
+      '<a href="https://github.com/WingerATB/theslate">WingerATB/theslate</a>. ' +
+      'Nothing is uploaded anywhere: the flashing happens between this page and ' +
+      'the cable.';
+  })
+  .catch(() => {
+    $('#verLine').textContent = 'Could not load the firmware list. Reload the page.';
+    $('#go').disabled = true;
+  });
+
+document.querySelectorAll('input[name=mode]').forEach(r => {
+  r.onchange = () => document.querySelectorAll('label.opt').forEach(l =>
+    l.classList.toggle('on', l.querySelector('input').checked));
+});
+
+const term = {
+  clean: () => { logBox.textContent = ''; },
+  writeLine: d => say(d),
+  write: d => { logBox.classList.remove('hide'); logBox.textContent += d;
+                logBox.scrollTop = logBox.scrollHeight; },
+};
+
+let busy = false;
+
+$('#go').onclick = async () => {
+  if (busy || !manifest) return;
+  busy = true;
+  $('#go').disabled = true;
+  logBox.textContent = '';
+  $('#chipPill').classList.add('hide');
+  $('#barWrap').classList.add('hide');
+  $('#bar').style.width = '0';
+
+  let transport = null;
+  try {
+    $('#status').textContent = 'Waiting for you to pick the device…';
+    const port = await navigator.serial.requestPort();
+    transport = new Transport(port, true);
+
+    $('#status').textContent = 'Talking to the board…';
+    const loader = new ESPLoader({ transport, baudrate: 921600, terminal: term });
+    await loader.main();
+
+    const name = loader.chip.CHIP_NAME;
+    const pill = $('#chipPill');
+    pill.classList.remove('hide');
+
+    if (REFUSED[name]) {
+      pill.className = 'pill bad';
+      pill.textContent = name + ' — not supported';
+      $('#status').textContent = REFUSED[name];
+      say('\nRefused: ' + name + ' cannot run this firmware. Nothing was written.');
+      await transport.disconnect();
+      return;
+    }
+
+    const target = CHIPS[name];
+    if (!target || !manifest.targets[target]) {
+      pill.className = 'pill bad';
+      pill.textContent = name + ' — no image';
+      $('#status').textContent =
+        'This release has no firmware for ' + name + '. Nothing was written.';
+      say('\nNo image published for ' + name + '.');
+      await transport.disconnect();
+      return;
+    }
+
+    pill.className = 'pill ok';
+    pill.textContent = name;
+
+    const mode = document.querySelector('input[name=mode]:checked').value;
+    const spec = manifest.targets[target][mode];
+    if (!spec) {
+      $('#status').textContent = 'This release has no ' + mode + ' image for ' + name + '.';
+      await transport.disconnect();
+      return;
+    }
+
+    $('#status').textContent = 'Downloading firmware for ' + name + '…';
+    say('\n' + name + ' detected → ' + spec.file);
+    const buf = await (await fetch(spec.file, {cache: 'no-store'})).arrayBuffer();
+    const data = new Uint8Array(buf);
+    say('image ' + data.length.toLocaleString() + ' bytes → 0x' +
+        spec.address.toString(16));
+
+    /* An UPDATE writes the app slot and then blanks the OTA selector, so the
+       bootloader falls back to that slot. Without it a module that last booted
+       from the OTHER slot would keep booting the old firmware and the update
+       would look like it silently failed.
+
+       A FULL install writes the whole layout including a fresh OTA selector, so
+       it needs nothing extra -- and it takes the NVS region with it, which is
+       why it is described as erasing your settings. */
+    const files = [{ data, address: spec.address }];
+    if (mode === 'update' && manifest.otadata_address !== undefined) {
+      files.push({
+        data: new Uint8Array(0x2000).fill(0xFF),
+        address: manifest.otadata_address,
+      });
+      say('resetting the boot selector so the new image is the one that runs');
+    }
+
+    $('#barWrap').classList.remove('hide');
+    $('#status').textContent = 'Writing — do not unplug it.';
+
+    await loader.writeFlash({
+      fileArray: files,
+      flashSize: 'keep',
+      flashMode: 'keep',
+      flashFreq: 'keep',
+      eraseAll: false,
+      compress: true,
+      reportProgress: (i, written, total) => {
+        const per = 100 / files.length;
+        $('#bar').style.width = (i * per + (written / total) * per).toFixed(1) + '%';
+      },
+    });
+
+    await loader.after();
+    $('#bar').style.width = '100%';
+    $('#status').innerHTML = mode === 'update'
+      ? '<b>Done.</b> Your settings are untouched. Unplug it and wire it back to ' +
+        'the flight controller.'
+      : '<b>Done.</b> Unplug it, wire it to the flight controller, then hold the ' +
+        'module’s button for ten seconds to open the settings page and pick ' +
+        'your camera.';
+    say('\nFinished.');
+  } catch (e) {
+    const msg = (e && e.message) ? e.message : String(e);
+    /* The user closing Chrome's device picker is not an error, and reporting it
+       as one makes a tool look broken the first time somebody has a look. */
+    if (/No port selected|cancelled|aborted/i.test(msg)) {
+      $('#status').textContent = 'Cancelled. Press Connect when you are ready.';
+    } else {
+      $('#status').textContent = 'Failed: ' + msg;
+      say('\nFAILED: ' + msg);
+      say('If the board never appeared, hold BOOT, tap RESET, release BOOT, and ' +
+          'try again.');
+    }
+    try { if (transport) await transport.disconnect(); } catch (_) {}
+  } finally {
+    busy = false;
+    $('#go').disabled = false;
+  }
+};
+</script>
+</body>
+</html>
