@@ -30,12 +30,15 @@ const osd_field_info_t osd_fields[OSD_F__COUNT] = {
     [OSD_F_NONE]       = { "",           "",          0 },
     [OSD_F_STATE]      = { "State",      "NO CAM",    7 },  /* "CAM HOT" */
     [OSD_F_CLIP]       = { "Clip time",  "12:34",     7 },  /* "1092:15" */
-    [OSD_F_BATTERY]    = { "Battery",    "BAT 87%",   8 },  /* "BAT 100%" */
+    [OSD_F_BATTERY]    = { "Battery",    "87%",       5 },  /* icon + "100%" on screen */
     [OSD_F_BATT_PCT]   = { "Battery %",  "87%",       4 },  /* "100%" */
     [OSD_F_CARD]       = { "Card left",  "SD 1H49",   8 },  /* "SD 99H59" */
     [OSD_F_CARD_SHORT] = { "Card",       "1H49",      5 },  /* "99H59" */
     [OSD_F_DOT]        = { "Alive dot",  ".",         1 },
     [OSD_F_CAMERA]     = { "Camera",     "O360",      4 },
+    [OSD_F_WARN]       = { "Warning",    "CAM HOT",   7 },  /* blinks when set */
+    [OSD_F_RES]        = { "Resolution", "5.3K",      4 },  /* GoPro           */
+    [OSD_F_FPS]        = { "FPS",        "240",       3 },  /* GoPro           */
 };
 
 int osd_row_width(const uint8_t row[OSD_ROW_FIELDS])
@@ -80,8 +83,43 @@ static const char *setup_word(camlink_setup_hint_t h)
     }
 }
 
+/* The single most important warning right now, or NULL.
+ *
+ * Priority is "what needs doing before the next second". Nothing here is shown
+ * unless the camera confirmed the reading it rests on -- a warning built on a
+ * value the camera never sent would be worse than no warning. Thresholds are
+ * fixed for now; making them configurable is a follow-up.
+ *
+ * REC? is first and it is the whole point of the product: the module wants a
+ * recording (armed, or the switch is on) and the camera is not rolling. That is
+ * the failure you can still do something about while the props are spinning. */
+static const char *osd_warning(const cam_status_t *cam, bool want_recording, bool cam_gone)
+{
+    if (cam_gone) return NULL;                    /* the state field says NO CAM */
+    if (want_recording && !(cam->recording && cam->recording_valid)) return "REC?";
+    if (cam->temp_over_valid && cam->temp_over >= 2)                  return "CAM HOT";
+    if (cam->remain_time_valid && cam->remain_time_s == 0)           return "NO SD";
+    if (cam->remain_time_valid && cam->remain_time_s < 120)          return "SD LOW";
+    if (cam->battery_valid && cam->battery_pct <= 15)                return "BAT LOW";
+    return NULL;
+}
+
+/* Pick the battery glyph for a charge level: full (0x90) down to empty (0x96),
+ * rounded across the seven steps -- 100% is full, 0% is empty. This is the same
+ * idea Betaflight uses for its own battery gauge, so the icon reads the way a
+ * pilot already expects. */
+static char osd_batt_glyph(uint8_t pct)
+{
+    if (pct > 100) pct = 100;
+    int idx = ((100 - (int)pct) * (OSD_SYM_BATT_EMPTY - OSD_SYM_BATT_FULL) + 50) / 100;
+    if (idx < 0) idx = 0;
+    if (idx > (OSD_SYM_BATT_EMPTY - OSD_SYM_BATT_FULL)) idx = OSD_SYM_BATT_EMPTY - OSD_SYM_BATT_FULL;
+    return (char)(OSD_SYM_BATT_FULL + idx);
+}
+
 static int render_field(uint8_t f, const cam_status_t *cam, bool heartbeat,
-                        bool cam_gone, camlink_setup_hint_t setup,
+                        bool cam_gone, bool want_recording,
+                        camlink_setup_hint_t setup,
                         char *buf, size_t cap)
 {
     buf[0] = '\0';
@@ -126,12 +164,37 @@ static int render_field(uint8_t f, const cam_status_t *cam, bool heartbeat,
         return 1;
     }
 
+    if (f == OSD_F_RES) {
+        if (!cam->res_valid) return 0;
+        snprintf(buf, cap, "%s", cam->res);
+        return 1;
+    }
+    if (f == OSD_F_FPS) {
+        if (!cam->fps_valid) return 0;
+        snprintf(buf, cap, "%s", cam->fps);
+        return 1;
+    }
+
+    if (f == OSD_F_WARN) {
+        const char *w = osd_warning(cam, want_recording, cam_gone);
+        if (!w) return 0;                 /* nothing wrong: blank, holds place */
+        /* Blink so it catches the eye rather than sitting there like a label. */
+        snprintf(buf, cap, "%s", heartbeat ? w : "");
+        return 1;
+    }
+
     switch (f) {
     case OSD_F_STATE:
         if (cam->temp_over_valid && cam->temp_over >= 2) {
             /* 2 = too hot to record, 3 = about to shut down. Worth saying: it
              * explains why recording silently is not happening. */
             snprintf(buf, cap, "CAM HOT");
+        } else if (want_recording && !(cam->recording && cam->recording_valid)) {
+            /* The module wants a recording and the camera is not rolling. This
+             * is the alarm the whole product exists for, so the state slot --
+             * the one field a pilot who picks only one will pick -- carries it,
+             * blinking. */
+            snprintf(buf, cap, "%s", heartbeat ? "REC?" : "");
         } else {
             snprintf(buf, cap, "%s", cam->recording ? "REC" : "IDLE");
         }
@@ -145,7 +208,11 @@ static int render_field(uint8_t f, const cam_status_t *cam, bool heartbeat,
 
     case OSD_F_BATTERY:
         if (!cam->battery_valid) return 0;
-        snprintf(buf, cap, "BAT %u%%", (unsigned)cam->battery_pct);
+        /* Battery glyph, then the percentage. Written as a byte rather than in
+         * a string literal so the hex escape cannot swallow the digit after
+         * it. */
+        buf[0] = osd_batt_glyph(cam->battery_pct);
+        snprintf(buf + 1, cap - 1, "%u%%", (unsigned)cam->battery_pct);
         return 1;
 
     case OSD_F_BATT_PCT:
@@ -181,7 +248,6 @@ void camlink_format_osd(const cam_status_t *cam, bool msp_link_up,
 {
     (void)msp_link_up;
     (void)clip_elapsed_s;
-    (void)want_recording;
 
     if (layout == NULL) layout = default_layout;
 
@@ -203,7 +269,7 @@ void camlink_format_osd(const cam_status_t *cam, bool msp_link_up,
             if (f == OSD_F_NONE || f >= OSD_F__COUNT) continue;
 
             char part[OSD_ROW_MAX + 1];
-            if (!render_field(f, cam, heartbeat, cam_gone, setup, part, sizeof(part))) {
+            if (!render_field(f, cam, heartbeat, cam_gone, want_recording, setup, part, sizeof(part))) {
                 /* Unconfirmed: the field contributes nothing but still holds
                  * its place in the row's width, so the fields after it do not
                  * shuffle sideways every time a reading comes and goes. */

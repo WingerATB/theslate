@@ -10,6 +10,8 @@ cc $CFLAGS -I../../components/camlink/include -o test_osd_format \
    test_osd_format.c ../../components/camlink/osd_format.c
 cc $CFLAGS -I../../components/camlink/include -o test_osd_layout \
    test_osd_layout.c ../../components/camlink/osd_format.c
+cc $CFLAGS -I../../components/camlink/include -o test_warnings \
+   test_warnings.c ../../components/camlink/osd_format.c
 cc $CFLAGS -I../../components/camlink/include -o test_switch_window \
    test_switch_window.c
 cc $CFLAGS -I../../components/webcfg -o test_url_decode \
@@ -25,6 +27,7 @@ echo
 ./test_osd_format
 echo
 ./test_osd_layout
+./test_warnings
 echo
 ./test_switch_window
 echo

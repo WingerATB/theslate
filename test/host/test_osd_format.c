@@ -102,7 +102,7 @@ int main(void)
         camlink_format_osd(&c, true, true, 0, false, NULL, CAMLINK_SETUP_NONE, out);
         EXPECT(0, "REC");
         EXPECT(1, "01:35");
-        EXPECT(2, "BAT 87%");
+        EXPECT(2, "\x91" "87%");
         EXPECT(3, "SD 12:34");
     }
 
@@ -134,7 +134,7 @@ int main(void)
         camlink_format_osd(&c, true, false, 0, false, NULL, CAMLINK_SETUP_NONE, out);
         EXPECT(0, "IDLE");
         EXPECT(1, "");
-        EXPECT(2, "BAT 100%");
+        EXPECT(2, "\x90" "100%");
     }
 
     /* 6. Overheating outranks the record state -- it explains why a clip is

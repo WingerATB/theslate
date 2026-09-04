@@ -310,8 +310,20 @@ static void ui_task_update(void *arg)
         cam_status_t cam;
         camlink_get_cam_status(&cam);
 
+        /* A camera warning outranks everything: a low battery or a missing
+         * card while it is otherwise happily connected is exactly what a glance
+         * at the module before takeoff should catch. "Should be recording but
+         * is not" is not decided here -- that needs the record intent, which
+         * lives with the logic task and is shown on the OSD instead. */
+        bool cam_warn = cam.connected &&
+            ((cam.temp_over_valid && cam.temp_over >= 2) ||
+             (cam.battery_valid && cam.battery_pct <= 15) ||
+             (cam.remain_time_valid && cam.remain_time_s == 0));
+
         /* Highest-priority true condition wins the single LED. */
-        if (cam.connected && cam.recording_valid && cam.recording) {
+        if (cam_warn) {
+            ui_set_led(UI_LED_WARN);
+        } else if (cam.connected && cam.recording_valid && cam.recording) {
             ui_set_led(UI_LED_RECORDING);
         } else if (cam.connected) {
             ui_set_led(UI_LED_CONNECTED);

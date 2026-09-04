@@ -29,6 +29,9 @@ typedef enum {
     OSD_F_CARD_SHORT,   /* 1H49    -- the same, without the label            */
     OSD_F_DOT,          /* the liveness dot                                  */
     OSD_F_CAMERA,       /* NANO / O360 / A5 -- which camera is bound         */
+    OSD_F_WARN,         /* the most important warning right now, or blank    */
+    OSD_F_RES,          /* video resolution: 4K / 1080 ... (GoPro)           */
+    OSD_F_FPS,          /* framerate: 60 / 30 ... (GoPro)                    */
     OSD_F__COUNT
 } osd_field_t;
 
@@ -42,6 +45,13 @@ extern const osd_field_info_t osd_fields[OSD_F__COUNT];
 
 /* A row holds up to this many fields, and the module has this many rows --
  * Betaflight offers exactly four custom messages. */
+/* Betaflight OSD font battery glyphs, from src/main/drivers/osd_symbols.h.
+ * The graduated set fills and empties with the reading: 0x90 is full, 0x96 is
+ * empty, and the five steps between. Drawn through the same font a custom
+ * message uses, so the byte becomes the icon on screen. See osd_batt_glyph(). */
+#define OSD_SYM_BATT_FULL   0x90
+#define OSD_SYM_BATT_EMPTY  0x96
+
 #define OSD_ROWS         4
 #define OSD_ROW_FIELDS   4
 

@@ -87,6 +87,7 @@ static inline bool camlink_may_enter_setup(bool link_up, bool boxarm_known, bool
 }
 
 #define CAMLINK_CFG_HOLD_DS_MAX     100
+#define CAMLINK_STOP_DELAY_MAX      30
 #define CAMLINK_CFG_HOLD_DS_DEFAULT  20
 
 /* Press detector for BUTTON mode, kept here rather than inside the logic task
@@ -159,6 +160,14 @@ typedef struct {
     uint8_t  cfg_hold_ds;       /* how long a SWITCH must be held, in tenths
                                  * of a second, 0..100. Ignored by a BUTTON,
                                  * which has no position to hold.            */
+    uint8_t  hilight_channel;   /* RAW index of the HiLight switch, 0 = off.
+                                 * A movement of this channel tags a HiLight
+                                 * moment on a GoPro. Appended, so an older
+                                 * blob loads with it off.                   */
+    uint8_t  stop_delay_s;      /* keep recording this many seconds after the
+                                 * automatic intent says stop (disarm/switch
+                                 * off), so a crash on landing does not cut
+                                 * the clip. 0..30. Appended.                */
 } camlink_cfg_t;
 
 /* --------------------------------------------------------------------------
@@ -348,6 +357,8 @@ bool camlink_cfg_set_tx_auto(uint8_t on);
 bool camlink_cfg_set_config_channel(uint8_t ch);
 bool camlink_cfg_set_config_kind(uint8_t kind);
 bool camlink_cfg_set_config_hold(uint8_t ds);
+bool camlink_cfg_set_hilight_channel(uint8_t ch);
+bool camlink_cfg_set_stop_delay(uint8_t s);
 
 /* Replace the whole OSD layout. Rejected as a unit if any row would not fit in
  * OSD_ROW_MAX characters -- a row that overflows loses its last field silently

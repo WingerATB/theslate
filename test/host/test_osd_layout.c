@@ -45,11 +45,13 @@ int main(void)
     {
         uint8_t r1[OSD_ROW_FIELDS] = { OSD_F_STATE, OSD_F_DOT, 0, 0 };
         CHECK(osd_row_width(r1) == 9, "state+dot = %d, expected 9", osd_row_width(r1));
-        uint8_t r2[OSD_ROW_FIELDS] = { OSD_F_BATTERY, OSD_F_CARD, 0, 0 };
-        CHECK(osd_row_width(r2) == 17, "bat+card = %d, expected 17", osd_row_width(r2));
-        CHECK(!osd_row_fits(r2), "bat+card must NOT fit in %d", OSD_ROW_MAX);
+        /* Battery is a one-column icon now, so the pair that used to overflow
+         * fits; a third field is what pushes it over. */
+        uint8_t r2[OSD_ROW_FIELDS] = { OSD_F_BATTERY, OSD_F_CARD, OSD_F_STATE, 0 };
+        CHECK(osd_row_width(r2) == 22, "bat+card+state = %d, expected 22", osd_row_width(r2));
+        CHECK(!osd_row_fits(r2), "bat+card+state must NOT fit in %d", OSD_ROW_MAX);
         uint8_t r3[OSD_ROW_FIELDS] = { OSD_F_BATTERY, OSD_F_CARD_SHORT, 0, 0 };
-        CHECK(osd_row_width(r3) == 14, "bat+card short = %d, expected 14", osd_row_width(r3));
+        CHECK(osd_row_width(r3) == 11, "bat+card short = %d, expected 11", osd_row_width(r3));
         CHECK(osd_row_fits(r3), "bat+short card must fit");
         uint8_t r0[OSD_ROW_FIELDS] = { 0, 0, 0, 0 };
         CHECK(osd_row_width(r0) == 0, "empty row width must be 0");
@@ -60,7 +62,7 @@ int main(void)
         cam_status_t c = live();
         camlink_format_osd(&c, true, true, 0, true, NULL, CAMLINK_SETUP_NONE, out);
         EXPECT(0, "REC     ."); EXPECT(1, "12:34  ");
-        EXPECT(2, "BAT 87% ");   EXPECT(3, "SD 1H49 ");
+        EXPECT(2, "\x91" "87% ");   EXPECT(3, "SD 1H49 ");
     }
 
     printf("3. two fields on one row, each padded to its own worst case\n");
@@ -89,7 +91,7 @@ int main(void)
         camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
         /* Battery must stay in the same columns it occupies while recording,
          * otherwise it walks left and right as clips start and stop. */
-        EXPECT(0, "        BAT 87% ");
+        EXPECT(0, "        " "\x91" "87% ");
     }
 
     printf("5. a silent camera says NO CAM wherever the state field was put\n");
@@ -104,7 +106,7 @@ int main(void)
         c.recording_valid = false;      /* ...but nothing is arriving */
         c.battery_pct = 87; c.battery_valid = true;   /* stale, must not show */
         camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
-        EXPECT(0, "        ");
+        EXPECT(0, "     ");
         EXPECT(1, "         NO CAM ");
     }
 
@@ -149,11 +151,11 @@ int main(void)
         cam_status_t c = live();
         c.temp_over = 3;          c.temp_over_valid = true;   /* "CAM HOT" */
         c.record_time_s = 65535;  /* 1092:15 */
-        c.battery_pct = 100;      /* "BAT 100%" */
+        c.battery_pct = 100;      /* icon + "100%" */
         c.remain_time_s = 359999; /* "SD 99H59" */
         camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_NONE, out);
         EXPECT(0, "CAM HOT 1092:15");
-        EXPECT(1, "BAT 100%");
+        EXPECT(1, "\x90" "100%");
         EXPECT(2, "SD 99H59");
         CHECK((int)strlen(out[0]) == osd_row_width(l[0]),
               "row 0 rendered %d chars but budgets %d -- the picker would be lying",
@@ -200,7 +202,7 @@ int main(void)
         EXPECT(0, "ENTER    ");
         /* Everything else carries on: those readings are still true, and still
          * worth having while deciding whether to commit. */
-        EXPECT(1, "BAT 87% ");
+        EXPECT(1, "\x91" "87% ");
 
         camlink_format_osd(&c, true, true, 0, false, l, CAMLINK_SETUP_READY, out);
         EXPECT(0, "READY    ");

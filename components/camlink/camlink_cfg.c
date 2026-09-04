@@ -119,6 +119,7 @@ void camlink_cfg_init(void)
     s_cfg.range_max      = MAX_THRESHOLD;
     s_cfg.cfg_ver        = CAMLINK_CFG_VER;
     s_cfg.cfg_hold_ds    = CAMLINK_CFG_HOLD_DS_DEFAULT;
+    s_cfg.stop_delay_s   = 5;   /* crash insurance on by default, like the product it mirrors */
     memcpy(s_cfg.osd, k_default_osd, sizeof(k_default_osd));
 #if   defined(CONFIG_CAMLINK_TX_N12)
     s_cfg.tx_power       = CFG_TX_N12;
@@ -270,6 +271,27 @@ bool camlink_cfg_set_config_kind(uint8_t kind)
     if (kind > CFG_SW_BUTTON) return false;
     if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
     s_cfg.cfg_kind = kind;
+    bool ok = commit();
+    if (s_lock) xSemaphoreGive(s_lock);
+    return ok;
+}
+
+bool camlink_cfg_set_stop_delay(uint8_t s)
+{
+    if (s > CAMLINK_STOP_DELAY_MAX) return false;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_cfg.stop_delay_s = s;
+    bool ok = commit();
+    if (s_lock) xSemaphoreGive(s_lock);
+    return ok;
+}
+
+bool camlink_cfg_set_hilight_channel(uint8_t ch)
+{
+    /* 0 = off, or a raw RC index -- same bound as the record channel. */
+    if (ch > MAX_RC_CHANNEL) return false;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_cfg.hilight_channel = ch;
     bool ok = commit();
     if (s_lock) xSemaphoreGive(s_lock);
     return ok;

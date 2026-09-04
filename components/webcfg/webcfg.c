@@ -280,7 +280,7 @@ int webcfg_state_json(char *body, size_t cap)
 
     int  n = snprintf(body, cap,
         "{\"ssid\":\"%s\",\"fw\":\"%s\","
-        "\"cfg\":{\"mode\":%u,\"aux\":%d,\"min\":%u,\"max\":%u,\"tx\":%u,\"kind\":%u,\"txauto\":%u,\"cfgaux\":%d,\"cfgkind\":%u,\"cfghold\":%u},"
+        "\"cfg\":{\"mode\":%u,\"aux\":%d,\"min\":%u,\"max\":%u,\"tx\":%u,\"kind\":%u,\"txauto\":%u,\"cfgaux\":%d,\"cfgkind\":%u,\"cfghold\":%u,\"hilight\":%d,\"stopdelay\":%u},"
         "\"cam\":{\"bound\":%s,\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
         "\"fault\":\"%s\",\"fails\":%u,\"everup\":%s},"
         "\"fc\":{\"link\":%s,\"armed\":%s,\"n\":%u,\"rc\":[",
@@ -289,6 +289,8 @@ int webcfg_state_json(char *body, size_t cap)
         cfg.range_min, cfg.range_max, cfg.tx_power, cfg.switch_kind, cfg.tx_auto,
         cfg.cfg_channel ? cfg_index_to_aux(cfg.cfg_channel) : 0,
         cfg.cfg_kind, cfg.cfg_hold_ds,
+        cfg.hilight_channel ? cfg_index_to_aux(cfg.hilight_channel) : 0,
+        cfg.stop_delay_s,
         bound ? "true" : "false",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
         camlink_ble_fault_text(fault_reason), (unsigned)fault_count,
@@ -383,7 +385,7 @@ const char *webcfg_apply_config(const char *body)
      * mode saved, out-of-range channel rejected -- leaves the module in a state
      * the user never asked for and cannot see. Either the whole form lands or
      * none of it does. */
-    uint32_t mode, aux, lo, hi, tx, kind, txauto, cfgaux, cfgkind, cfghold;
+    uint32_t mode, aux, lo, hi, tx, kind, txauto, cfgaux, cfgkind, cfghold, hilight = 0, stopdelay = 5;
     if (!field_u32(body, "mode", &mode) || !field_u32(body, "aux", &aux) ||
         !field_u32(body, "min", &lo)    || !field_u32(body, "max", &hi)  ||
         !field_u32(body, "tx", &tx)     || !field_u32(body, "kind", &kind) ||
@@ -410,6 +412,10 @@ const char *webcfg_apply_config(const char *body)
     if (cfgkind > CFG_SW_BUTTON)                 return "setup control type out of range";
     if (cfghold > CAMLINK_CFG_HOLD_DS_MAX)       return "setup hold time out of range";
     /* Optional: older pages do not send it, so it stays 0 (off). */
+    field_u32(body, "hilight", &hilight);
+    if (hilight > 14)                            return "HiLight channel out of range";
+    field_u32(body, "stopdelay", &stopdelay);
+    if (stopdelay > CAMLINK_STOP_DELAY_MAX)      return "stop delay out of range";
 
     bool ok = camlink_cfg_set_mode((uint8_t)mode)
            && camlink_cfg_set_channel(cfg_aux_to_index((uint8_t)aux))
@@ -420,7 +426,9 @@ const char *webcfg_apply_config(const char *body)
            /* 0 means no setup switch; anything else is an AUX number. */
            && camlink_cfg_set_config_channel(cfgaux ? cfg_aux_to_index((uint8_t)cfgaux) : 0)
            && camlink_cfg_set_config_kind((uint8_t)cfgkind)
-           && camlink_cfg_set_config_hold((uint8_t)cfghold);
+           && camlink_cfg_set_config_hold((uint8_t)cfghold)
+           && camlink_cfg_set_hilight_channel(hilight ? cfg_aux_to_index((uint8_t)hilight) : 0)
+           && camlink_cfg_set_stop_delay((uint8_t)stopdelay);
 
     if (!ok) {
         return "save failed";

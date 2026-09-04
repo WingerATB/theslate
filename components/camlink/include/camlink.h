@@ -45,6 +45,11 @@ typedef struct {
                                   * time; never blank, so the field renders
                                   * even for a camera we do not recognise    */
 
+    char     res[8];             /* video resolution label, GoPro only        */
+    bool     res_valid;
+    char     fps[8];             /* framerate label, GoPro only               */
+    bool     fps_valid;
+
     uint32_t last_update_ms;
     size_t   last_payload_len;   /* bytes the camera sent in the last push    */
 } cam_status_t;

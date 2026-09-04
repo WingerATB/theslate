@@ -138,7 +138,7 @@ footer button{flex:1}
 <div class="wrap">
 
 <header>
-  <h1>SLATE</h1>
+  <h1>SlateFPV</h1>
   <span class="meta" id="meta"></span>
 </header>
 
@@ -170,6 +170,15 @@ footer button{flex:1}
     <label><input type="radio" name="mode" value="3">Both</label>
   </div>
   <div class="desc" id="modeDesc"></div>
+
+  <div style="margin-top:16px">
+    <div class="row"><label for="stopdelay">Keep recording after stop</label>
+      <span class="num" id="stopdelayV"></span></div>
+    <input type="range" id="stopdelay" min="0" max="30" step="1">
+    <div class="note">Crash insurance: after the automatic stop (disarm, or the
+      switch off), keep recording this many seconds so a crash on landing is not
+      cut off. Re-arming during the countdown cancels it.</div>
+  </div>
 
   <div id="chanCard" style="margin-top:18px">
     <div class="row" style="margin-bottom:10px">
@@ -275,6 +284,18 @@ footer button{flex:1}
 </section>
 
 <section>
+  <h2>GoPro</h2>
+  <div class="row">
+    <label for="hilight" style="font-weight:600">HiLight channel</label>
+    <select id="hilight" style="background:var(--bg);color:var(--ink);
+      border:1px solid var(--line-2);border-radius:9px;padding:9px 10px;
+      font-size:15px;min-width:110px"></select>
+  </div>
+  <div class="note">A flick of this channel tags a HiLight moment on a GoPro, so
+    you can jump straight to it in the footage. Off, or any AUX channel.</div>
+</section>
+
+<section>
   <h2>Flight controller</h2>
   <div class="row"><span>MSP link</span><span class="pill" id="fcPill">—</span></div>
   <div class="row"><span>Armed</span><span class="pill" id="armPill">—</span></div>
@@ -374,13 +395,15 @@ for (let i = 1; i <= AUX_MAX; i++) {
   $('#aux').appendChild(o);
 }
 {
-  const off = document.createElement('option');
-  off.value = 0; off.textContent = 'Off';
-  $('#cfgaux').appendChild(off);
-  for (let i = 1; i <= AUX_MAX; i++) {
-    const o = document.createElement('option');
-    o.value = i; o.textContent = 'AUX ' + i;
-    $('#cfgaux').appendChild(o);
+  for (const sel of ['#cfgaux', '#hilight']) {
+    const off = document.createElement('option');
+    off.value = 0; off.textContent = 'Off';
+    $(sel).appendChild(off);
+    for (let i = 1; i <= AUX_MAX; i++) {
+      const o = document.createElement('option');
+      o.value = i; o.textContent = 'AUX ' + i;
+      $(sel).appendChild(o);
+    }
   }
 }
 
@@ -485,6 +508,8 @@ function paint() {
   $('#cfgHoldCard').classList.toggle('hide', cfgKind === '1');
   const hd = +$('#cfghold').value;
   $('#cfgHoldV').textContent = hd === 0 ? 'instantly' : (hd / 10).toFixed(1) + ' s';
+  const sd = +$('#stopdelay').value;
+  $('#stopdelayV').textContent = sd === 0 ? 'off' : sd + ' s';
 
   const tx = $('input[name=tx]:checked')?.value;
   $('#txDesc').innerHTML = TX_DESC[tx] || '';
@@ -495,12 +520,21 @@ function paint() {
 // The two ends of the window must not cross. A min above max is a range that can
 // never match, which silently means "never record" -- a setting that looks saved
 // and does nothing is worse than one that refuses to be set.
+// Keep the two ends inside 900..2100 AND strictly apart, even at the extremes.
+// The old version pushed the other handle past 2100; the range input clamped it
+// back to 2100, leaving min == max -- a window that means "never record" and
+// that the firmware rightly refuses as out of range.
+const US_MIN = 900, US_MAX = 2100, US_GAP = 5;
 $('#min').addEventListener('input', () => {
-  if (+$('#min').value >= +$('#max').value) $('#max').value = +$('#min').value + 5;
+  let lo = +$('#min').value, hi = +$('#max').value;
+  if (lo > US_MAX - US_GAP) { lo = US_MAX - US_GAP; $('#min').value = lo; }
+  if (hi <= lo) { hi = lo + US_GAP; $('#max').value = hi; }
   paint();
 });
 $('#max').addEventListener('input', () => {
-  if (+$('#max').value <= +$('#min').value) $('#min').value = +$('#max').value - 5;
+  let lo = +$('#min').value, hi = +$('#max').value;
+  if (hi < US_MIN + US_GAP) { hi = US_MIN + US_GAP; $('#max').value = hi; }
+  if (lo >= hi) { lo = hi - US_GAP; $('#min').value = lo; }
   paint();
 });
 document.addEventListener('input', paint);
@@ -513,9 +547,9 @@ document.addEventListener('change', e => {
   if (t.name === 'mode' || t.name === 'tx' || t.name === 'kind' ||
       t.id === 'aux' || t.id === 'min' || t.id === 'max' ||
       t.id === 'txauto' || t.id === 'cfgaux' || t.id === 'cfghold' ||
-      t.name === 'cfgkind') setDirty(true);
+      t.id === 'hilight' || t.id === 'stopdelay' || t.name === 'cfgkind') setDirty(true);
 });
-['min', 'max', 'cfghold'].forEach(id =>
+['min', 'max', 'cfghold', 'stopdelay'].forEach(id =>
   $('#' + id).addEventListener('input', () => { if (loaded) setDirty(true); }));
 document.addEventListener('pointerdown',   () => holdRedraw(2000));
 document.addEventListener('pointerup',     () => holdRedraw(400));
@@ -541,6 +575,8 @@ function fill(s) {
   document.querySelector(`input[name=kind][value="${s.cfg.kind}"]`).checked = true;
   $('#txauto').checked = !!s.cfg.txauto;
   $('#cfgaux').value = s.cfg.cfgaux || 0;
+  $('#hilight').value = s.cfg.hilight || 0;
+  $('#stopdelay').value = (s.cfg.stopdelay != null ? s.cfg.stopdelay : 5);
   document.querySelector(`input[name=cfgkind][value="${s.cfg.cfgkind}"]`).checked = true;
   $('#cfghold').value = s.cfg.cfghold;
   $('#aux').value = Math.min(Math.max(s.cfg.aux, 1), AUX_MAX);
@@ -595,7 +631,8 @@ function live(s) {
   ap.className = 'pill ' + (s.fc.link && s.fc.armed ? 'off' : '');
 
   const idx = +$('#aux').value + 3;
-  const us  = (s.fc.link && idx < s.fc.n) ? s.fc.rc[idx] : null;
+  const raw = (s.fc.link && s.fc.rc) ? s.fc.rc[idx] : undefined;
+  const us  = Number.isFinite(raw) ? raw : null;
   const m = $('#marker');
   if (us === null) {
     $('#live').textContent = s.fc.link ? 'channel not sent' : 'no link';
@@ -640,11 +677,11 @@ function renderCams(cams) {
     const cls = c.id === armedMac ? 'armed' : (c.bound ? 'sel' : '');
     const label = c.id === armedMac ? 'Tap again to select'
                 : c.bound          ? 'Selected'
-                : (c.model || c.name || 'DJI camera');
+                : (c.model || c.name || 'Camera');
     // data-id is the separator-free form the firmware parses; c.mac with its
     // colons is for the human reading the row.
     return `<div class="cam ${cls}" data-id="${c.id}">
-      <div class="info"><div class="nm">${c.name || c.model || 'DJI camera'}</div>
+      <div class="info"><div class="nm">${c.name || c.model || 'Camera'}</div>
       <div class="sub">${label} · ${c.mac}</div></div>${bars(c.rssi)}</div>`;
   }).join('');
 
@@ -718,6 +755,12 @@ const rowWidth = r => r.reduce((w, id, i) => w + CAT[id].w + (i ? 1 : 0), 0);
 const pad = (t, n) => (t + ' '.repeat(n)).slice(0, n);
 
 function drawOsd() {
+  // Never rebuild the grid mid-drag: replacing the tiles destroys the element
+  // the pointer is captured on, its pointerup never fires, and the floating
+  // clone is left stuck over the page. The drag's own pointerup clears `drag`
+  // before it calls drawOsd, so a legitimate redraw still gets through.
+  if (drag) return;
+  document.querySelectorAll('.otile.drag').forEach(g => g.remove());  // sweep orphans
   const box = $('#rows');
   box.innerHTML = layout.map((r, i) => {
     const w = rowWidth(r), over = w > OSDMAX;
@@ -753,10 +796,31 @@ function drawOsd() {
 // on a phone, and native dragstart/drop does not fire for touch at all. This
 // works the same for a finger and a mouse.
 let drag = null;
+// Safety net: if the dragged tile is torn out from under us (a redraw, an error
+// mid-drag), its own pointerup cannot fire. Catch the event at the window and
+// clean up, so a stuck clone can never block the page until a restart.
+window.addEventListener('pointerup', () => {
+  if (drag && !document.body.contains(drag.el)) {
+    if (drag.ghost) drag.ghost.remove();
+    drag = null;
+    document.querySelectorAll('.otile.drag').forEach(g => g.remove());
+    holdRedraw(400);
+    drawOsd();
+  }
+});
+window.addEventListener('pointercancel', () => {
+  if (drag) {
+    if (drag.ghost) drag.ghost.remove();
+    drag = null;
+    document.querySelectorAll('.otile.drag').forEach(g => g.remove());
+    drawOsd();
+  }
+});
 function bindTiles() {
   document.querySelectorAll('.otile').forEach(el => {
     el.onpointerdown = e => {
       e.preventDefault();
+      document.querySelectorAll('.otile.drag').forEach(g => g.remove());
       const ghost = el.cloneNode(true);
       ghost.classList.add('drag');
       const r = el.getBoundingClientRect();
@@ -840,6 +904,8 @@ $('#save').onclick = async () => {
     kind: $('input[name=kind]:checked').value,
     txauto: $('#txauto').checked ? 1 : 0,
     cfgaux:  $('#cfgaux').value,
+    hilight: $('#hilight').value,
+    stopdelay: $('#stopdelay').value,
     cfgkind: $('input[name=cfgkind]:checked').value,
     cfghold: $('#cfghold').value,
     aux:  $('#aux').value,
@@ -949,7 +1015,7 @@ arm($('#done'), () => (dirty || osdDirty)
 
   document.body.innerHTML =
     '<div class="wrap" style="padding:48px 16px"><h1>Restarting</h1>' +
-    '<p class="meta">The SLATE network is closing. The module is back to ' +
+    '<p class="meta">The SlateFPV network is closing. The module is back to ' +
     'normal operation &mdash; you can close this page.</p></div>';
 
   // Best effort only. A browser lets a page close a window that a SCRIPT

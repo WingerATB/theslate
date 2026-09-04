@@ -144,13 +144,20 @@ void camlink_poll_camera(void)
     s_cam.battery_pct   = d.battery_pct;
     s_cam.battery_valid = d.battery_valid;
 
+    strlcpy(s_cam.res, d.res, sizeof(s_cam.res));
+    s_cam.res_valid = d.status_valid && d.res[0] != '\0';
+    strlcpy(s_cam.fps, d.fps, sizeof(s_cam.fps));
+    s_cam.fps_valid = d.status_valid && d.fps[0] != '\0';
+
     /* Which camera is bound is known whether or not it is answering, so this
      * is copied unconditionally -- unlike every reading around it. */
     memcpy(s_cam.label, d.label, sizeof(s_cam.label));
 
-    /* DUML exposes no overheat field yet, so this slot stays unconfirmed
-     * rather than being faked as "temperature normal". */
-    s_cam.temp_over_valid = false;
+    /* DUML exposes no overheat field, so for a DJI camera this slot stays
+     * unconfirmed rather than being faked as "temperature normal". A GoPro
+     * reports it as status 6, and that comes through hot_valid. */
+    s_cam.temp_over       = d.hot;
+    s_cam.temp_over_valid = d.hot_valid;
 
     if (d.status_valid) {
         s_cam.last_update_ms = now_ms();
@@ -269,6 +276,7 @@ void camlink_logic_task(void *arg)
     bool     prev_switch = false;
     bool     switch_seen = false;   /* have we ever had a valid RC reading?   */
     camlink_press_t press_state = {0};   /* BUTTON mode; see camlink_cfg.h    */
+    camlink_press_t hilight_state = {0}; /* HiLight channel movement detector */
     camlink_ovr_t   ovr         = {0};   /* the manual override               */
     bool     auto_prev   = false;        /* last tick's automatic intent      */
     bool     auto_seen   = false;
@@ -346,6 +354,17 @@ void camlink_logic_task(void *arg)
          * That is the "you have to press it twice" fault, and it is not a
          * tuning problem -- the two are different questions and need different
          * code. */
+        /* HiLight: a movement of the configured channel tags a moment on the
+         * camera. It is its own control, independent of recording, and it is
+         * always momentary -- one flick, one tag -- so it uses the same
+         * movement detector a BUTTON record switch does. Off when the channel
+         * is 0. GoPro only; a no-op on a camera that cannot tag. */
+        if (cfg.hilight_channel != 0 && m.rc_valid &&
+            cfg.hilight_channel < m.rc_count &&
+            camlink_press_update(&hilight_state, m.rc[cfg.hilight_channel])) {
+            duml_cam_request_hilight();
+        }
+
         bool rising = sw && !prev_switch;
         bool press  = rising;
 
@@ -381,6 +400,23 @@ void camlink_logic_task(void *arg)
                        ? camlink_auto_want(cfg.mode, cfg.switch_kind,
                                            armed_ref, sw, rc_latch)
                        : false;
+
+        /* Stop-delay (crash insurance): when the automatic intent drops from
+         * record to stop, keep recording for the configured seconds before
+         * actually stopping, so a crash on landing -- which disarms -- does not
+         * cut the clip. Recording again during the countdown cancels it. Only
+         * the automatic intent is delayed; a manual stop still acts at once. */
+        {
+            static bool     prev_raw = false;
+            static uint32_t stop_at  = 0;
+            uint32_t dly = (uint32_t)cfg.stop_delay_s * 1000u;
+            if (auto_want)                 stop_at = 0;
+            else if (prev_raw && dly)      stop_at = now_ms() + dly;
+            prev_raw = auto_want;
+            if (!auto_want && stop_at && (int32_t)(stop_at - now_ms()) > 0) {
+                auto_want = true;
+            }
+        }
 
         /* In SWITCH+BUTTON the RC press drives the mode's own latch. In BOTH it
          * is a manual press like the front-panel button. Everywhere else it is
