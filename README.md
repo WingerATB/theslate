@@ -368,3 +368,22 @@ here to test against. It speaks the same protocol as the Osmo 360, which has
 flown.
 
 Found a problem? [Open an issue](../../issues).
+
+---
+
+## Contributing
+
+**I'm not taking pull requests.** The licence does not grant the right to make
+derivative works, so a PR sits outside what it permits — and accepting one would
+leave the author holding copyright on code I could not then license under the
+same terms. Sorting that out means a contributor agreement, which is more
+process than this project wants.
+
+That is a licensing decision and nothing to do with the quality of anyone's
+work. Please don't spend a weekend on a patch here; I would rather say so now
+than after.
+
+**Bug reports and questions are very welcome.** If something is broken, or the
+OSD says one thing while your camera does another, [open an
+issue](../../issues) — a good bug report is worth considerably more to this
+project than a patch I cannot merge.
