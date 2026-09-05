@@ -9,7 +9,7 @@
 
 **Arm the quad. The camera rolls.**
 
-[![Release](https://img.shields.io/badge/release-1.1.0--beta1-0F8A4A?style=flat-square)](../../releases)
+[![Release](https://img.shields.io/badge/release-1.1.0-0F8A4A?style=flat-square)](../../releases)
 [![License](https://img.shields.io/badge/license-PolyForm%20Strict-14171C?style=flat-square)](LICENSE)
 [![Hardware](https://img.shields.io/badge/hardware-ESP32--C3-5B636E?style=flat-square)](#what-you-need)
 [![Buy me a coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-FFDD00?style=flat-square&logo=buymeacoffee&logoColor=14171C)](https://www.buymeacoffee.com/wingeratb)
@@ -21,10 +21,16 @@
 Your DJI Osmo starts recording the moment you arm, and stops when you disarm.
 The camera's own state — recording, clip time, battery, card remaining — is
 drawn onto your Betaflight OSD, so you know it is rolling before you leave the
-ground. No more landing after a good pack to find the camera was never on.
+ground. And if it is *not* rolling, the OSD says so in as many words rather than
+leaving you to notice.
+
+Save up to four cameras and it takes whichever one is switched on, in the order
+you put them in — a Nano on the small quad, a 360 on the big one, no setup in
+between.
 
 Everything is set up from your phone over Wi-Fi. After the first flash you never
-need a cable again, including for firmware updates.
+need a cable again, including for firmware updates — and the first flash is a
+web page that works out which chip you have.
 
 ---
 
@@ -73,8 +79,10 @@ tab, no peripheral is needed on that UART — just leave it free.
 
 You only do this once. After that, updates happen over Wi-Fi from your phone.
 
-Grab **`slate-<version>-<chip>-full.bin`** from [Releases](../../releases) —
-the `-full` one, which contains everything the module needs to boot.
+The easiest way is the browser tool below — it works out which chip is on your
+board and installs the right firmware for it, so you never have to know which
+file is yours. If you would rather do it by hand, grab
+**`slate-<version>-<chip>-full.bin`** from [Releases](../../releases).
 
 **Which chip?** If you bought a C3 Supermini, which is what this ships on, it is
 `esp32c3`. There is no single file that works on all of them: an image carries
@@ -91,27 +99,32 @@ port rather than as a supported board.
 
 ### From your browser
 
-Espressif's own flashing tool runs in the browser, so there is nothing to
-install:
+**<https://wingeratb.github.io/theslate/>**
 
-**<https://espressif.github.io/esptool-js/>**
+Nothing to download and nothing to choose. The page reads which chip is on your
+board and installs the firmware for it:
 
 1. Plug the module into your computer with a USB-C cable, **with the flight
    battery out**.
-2. Open the page in **Chrome or Edge** — it uses Web Serial, which Safari and
-   Firefox do not support.
-3. Click **Connect** and pick the port that appears.
-4. Choose the `-full.bin` you downloaded — the one for **your** chip.
-5. **Change the Flash Address to `0x0`.** The box is pre-filled with `0x1000`,
-   which is the one thing here that will quietly go wrong — at that address the
-   module has no bootloader in front of it and will not start.
-6. Click **Program**.
+2. Open the link in **Chrome or Edge** — it uses Web Serial, which Safari and
+   Firefox do not have.
+3. Click **Connect** and pick your module from the list the browser shows.
 
 That is the whole job. When it finishes, unplug it and wire it to your flight
 controller.
 
-**If no port appears:** hold the module's BOOT button, tap RESET, then release
-BOOT, and click Connect again. Some boards need this the first time.
+It offers two choices. **First time, or recovery** installs everything and
+erases your settings, which is what you want on a new board. **Update** installs
+new firmware and keeps your saved cameras and settings — though you can do that
+from your phone over Wi-Fi instead, with no cable at all.
+
+Nothing is uploaded anywhere. The page runs in your browser and talks to the
+cable, and the firmware it serves is built by the same workflow that publishes
+the page, from the same source as the release.
+
+**If no device appears:** hold the module's BOOT button, tap RESET, then release
+BOOT, and click Connect again. Some boards need this the first time. A cable
+that only carries power and not data will also show nothing.
 
 ### Other ways, for the adventurous
 
@@ -122,7 +135,9 @@ downloaded as a standalone binary from
 rather not have Python involved.
 
 Either way you are writing the same `-full.bin` to offset `0x0`, with `--chip`
-set to the chip that file was built for.
+set to the chip that file was built for. The browser tool above does exactly
+this and asks fewer questions, so reach for the terminal only if you already
+know you want to.
 
 ### The other file in each release
 
@@ -387,6 +402,7 @@ row has spent.
 | **Card** | `1H49` | 5 |
 | **Alive dot** | `.` | 1 |
 | **Camera** | `O360` | 4 |
+| **Warning** | `NOT REC` | 7 |
 
 **State** is the field to give a row to if you only pick one:
 
@@ -395,8 +411,14 @@ row has spent.
 | `REC` | The camera is recording. |
 | `IDLE` | The camera is connected and not recording. |
 | `NO CAM` | No camera is talking to the module. |
-| `CAM HOT` | The camera is reporting a temperature warning. |
+| `REC 5` | Post-roll: still recording, counting down to the stop. |
 | `ENTER` / `READY` / `CONFIG` | The setup switch gesture, as above. |
+
+**Warning** is the other field worth a row. Give it one and it sits blank until
+something is wrong, then flashes `NOT REC`, `NO SD`, `CAM HOT`, `BAT LOW` or
+`SD LOW` — so you can put it across the middle of the screen where a flight
+controller puts its own warnings. If you do not give it a row, the State field
+carries those words instead. See [Warnings](#warnings).
 
 Widths are worst cases, not what is on screen right now: a battery reading books
 room for `100%` even while it says `87%`, and the clip timer books room for a
@@ -469,7 +491,7 @@ demo and stays under its original MIT licence. See [NOTICE](NOTICE).
 
 ## Status
 
-**1.1.0-beta1.** Read this in two halves, because they are not the same
+**1.1.0.** Read this in two halves, because they are not the same
 standard of evidence.
 
 **Flown, and working as intended** — everything that was in 1.0.0-beta1.
@@ -477,7 +499,7 @@ Verified in the air on an Osmo Nano and an Osmo 360: pairing, live camera
 status, every record mode, the OSD, the AUX trigger as both a switch and a
 momentary button, and firmware updates with rollback proven on hardware.
 
-**New in 1.1, and not yet flown.** All of it builds, and the logic is covered by
+**New since 1.0, and not yet flown.** All of it builds, and the logic is covered by
 host tests that compile the shipped source rather than a copy of it. None of it
 has been in the air:
 
@@ -487,6 +509,8 @@ has been in the air:
 | Keep recording after landing | tested at a desk, not flown |
 | More than one camera, in priority order | the list is host-tested; **the priority pick itself needs two cameras on a bench** |
 | Five more chips (S3, C6, C61, C5, ESP32) | they build and the images fit. **Nobody has bound a camera with one.** Only the C3 has flown |
+| Setup opening itself on a USB cable | tested on a C3 Supermini, not flown |
+| The browser flasher | **tested** — installs the right image for the detected chip, over a real cable |
 
 Two gaps are hardware rather than behaviour: there is no Osmo Action camera here
 to test against, and no board other than the C3 Supermini. The Action speaks the

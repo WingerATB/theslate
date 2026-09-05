@@ -14,7 +14,11 @@
 name: build
 
 on:
+  # Branches only. A tag push is a release, and release.yml already builds every
+  # target for it -- without this filter both workflows run the same six-chip
+  # matrix against the same commit at the same time.
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 

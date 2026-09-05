@@ -1,0 +1,137 @@
+# Build every supported chip and publish a GitHub Release, on a tag.
+#
+# The artifacts a release needs are NOT interchangeable, and the names say so
+# because picking the wrong one is the obvious mistake:
+#
+#   -full.bin    bootloader + partition table + app + a fresh OTA selector,
+#                written at 0x0 over USB. First flash on a blank board, or
+#                recovery. It also blanks NVS, so it erases the user's settings.
+#   -update.bin  the app alone. This is what the settings page installs over
+#                Wi-Fi, and it leaves NVS -- cameras and settings -- alone.
+#
+# One pair per chip, because an ESP-IDF image carries its target in its header
+# and will not boot on anything else.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release (e.g. v1.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32c3, esp32s3, esp32c6, esp32c61, esp32c5, esp32]
+    container: espressif/idf:v5.5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # The IDF container runs as root while the checkout is owned by another
+      # uid, so git refuses to touch it -- "detected dubious ownership".
+      - name: Let git use the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # The tag and the VERSION file must agree, or the release is named one
+      # thing and the firmware reports another -- and the only evidence a user
+      # has that an update landed is the version changing.
+      - name: Refuse a tag that disagrees with VERSION
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="v$(cat VERSION)"
+          if [ "$TAG" != "$VER" ]; then
+            echo "::error::tag $TAG does not match VERSION ($VER)"; exit 1
+          fi
+          echo "$TAG matches VERSION"
+
+      - name: Build ${{ matrix.target }}
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py -B "build-rel" -D SDKCONFIG="build-rel/sdkconfig.release" \
+                 -D IDF_TARGET=${{ matrix.target }} build
+
+      # The bench console can rebind the module to any MAC, drop its camera link
+      # and clear its BLE bonds. It must never reach a published download.
+      - name: Refuse an image carrying the bench console
+        shell: bash
+        run: |
+          if grep -q '^CONFIG_CAMLINK_BENCH=y' build-rel/sdkconfig.release; then
+            echo "::error::built WITH the bench console"; exit 1
+          fi
+          if grep -aq "BENCH CONSOLE ACTIVE" build-rel/slate.bin; then
+            echo "::error::the image contains the bench console"; exit 1
+          fi
+
+      - name: Package both images
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          mkdir -p out
+          cp build-rel/slate.bin "out/slate-${TAG}-${{ matrix.target }}-update.bin"
+          ( cd build-rel && esptool.py --chip ${{ matrix.target }} merge_bin \
+              -o "../out/slate-${TAG}-${{ matrix.target }}-full.bin" @flash_args )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ matrix.target }}
+          path: out/*.bin
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          ls -l dist
+
+          cat > notes.md <<'EOF'
+          ## Which file do I want?
+
+          | | |
+          |---|---|
+          | **`-full.bin`** | First flash on a new board, or recovery. Written at `0x0` over USB. **Erases your settings** — saved cameras, record mode, OSD layout. |
+          | **`-update.bin`** | Updating a module that already works. Installed from the settings page over Wi-Fi. **Keeps your settings.** |
+
+          Pick the file for **your chip**. An image carries the chip it was built
+          for in its header, and both the bootloader and the module's own updater
+          refuse a mismatch rather than half-flashing something that will not boot.
+          If you have a C3 Supermini — which is what this ships on — that is
+          `esp32c3`.
+
+          **Only the C3 has flown.** The other images build, link and fit, and
+          nobody has bound a camera with one. See `docs/COMPATIBILITY.md`.
+          EOF
+
+          gh release create "$TAG" dist/*.bin \
+            --title "$TAG" \
+            --notes-file notes.md \
+            --verify-tag

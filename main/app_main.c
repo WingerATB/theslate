@@ -35,6 +35,7 @@
 #include "esp_bt_device.h"
 #include "esp_gap_ble_api.h"
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "esp_bt.h"
 #include "nvs_flash.h"
 #include "webcfg.h"
@@ -523,21 +524,118 @@ static void ota_probation_start(void)
 #if SOC_USB_SERIAL_JTAG_SUPPORTED
 #include "hal/usb_serial_jtag_ll.h"
 
-static bool usb_host_present(void)
+/* Is a host sending frames right now? One 20 ms look. */
+static bool usb_sof_seen(void)
 {
-    /* Clear the latched bit, wait past several 1 ms frames, and look again.
-     * 20 ms is long enough that a genuine host cannot miss the window and
-     * short enough to be invisible in a boot that already takes 300 ms. */
     usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SOF);
     vTaskDelay(pdMS_TO_TICKS(20));
     bool sof = (usb_serial_jtag_ll_get_intraw_mask() & USB_SERIAL_JTAG_INTR_SOF) != 0;
     usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SOF);
     return sof;
 }
-#else
+
+/* Watch for a computer for the first few seconds, then stop.
+ *
+ * ASKING ONCE AT BOOT DOES NOT WORK, which is what the first version of this
+ * did. The module reaches this point about 300 ms after reset, and at that
+ * moment the USB host has usually not finished enumerating it -- the device
+ * has only just re-attached, and no frames are arriving yet. The answer was
+ * therefore "no computer" every time, on a cable that plainly had one.
+ *
+ * So it watches instead of asking, and it does the watching AFTER the module
+ * is already up. That ordering is the point: a module wired to a flight
+ * controller sees nothing, waits for nothing, and boots at exactly the speed it
+ * did before this feature existed. The delay is paid only on a bench, by
+ * somebody who is standing there.
+ *
+ * Entering setup is a reboot, which is the same way every other route in works
+ * -- and being visible is a property this project wants rather than one it
+ * tolerates.
+ */
+/* How long a plugged-in cable has to announce itself.
+ *
+ * MEASURED, not guessed, and the first guess was wrong. Six seconds looked
+ * generous against an enumeration that "takes a few hundred milliseconds" --
+ * and on this board a real plug-in was seen at 5280 ms, which is inside six
+ * seconds by a margin too thin to rely on. The symptom was the worst kind: it
+ * worked when tested over an already-open port, and failed on the cable the
+ * user actually plugs in.
+ *
+ * Thirty seconds is about six times the measured figure. It costs nothing to
+ * wait: the watcher runs after the module is fully up, so a module wired to a
+ * flight controller boots and flies at exactly the same speed either way, and
+ * all a longer window buys is a register read every tenth of a second by a task
+ * that is doing nothing else. */
+#define USB_WATCH_MS      30000
+#define USB_WATCH_STEP_MS   100
+
+static void usb_setup_watch_task(void *arg)
+{
+    (void)arg;
+    uint32_t waited = 0;
+
+    while (waited < USB_WATCH_MS) {
+        if (usb_sof_seen()) {
+            msp_state_t m;
+            msp_get_state(&m);
+            if (!camlink_may_enter_setup(m.link_up, m.boxarm_known, m.armed)) {
+                /* Armed, or a live link that has not yet said where BOXARM is.
+                 * Give up rather than keep watching: something is flying, or
+                 * about to, and a module that reboots itself later because a
+                 * cable is attached is worse than one that simply does not. */
+                ESP_LOGW(TAG, "USB host seen but setup is refused -- staying up");
+                break;
+            }
+            ESP_LOGW(TAG, "a computer is on the USB cable (after %u ms) -- entering setup",
+                     (unsigned)waited);
+            webcfg_reboot_into_config();
+            return;                      /* does not return, but say so */
+        }
+        vTaskDelay(pdMS_TO_TICKS(USB_WATCH_STEP_MS));
+        waited += USB_WATCH_STEP_MS + 20;   /* the step plus the sample itself */
+    }
+
+    ESP_LOGI(TAG, "no computer on USB after %u ms -- normal operation",
+             (unsigned)USB_WATCH_MS);
+    vTaskDelete(NULL);
+}
+
+/* Only on a POWER-ON reset -- that is, only when the cable was just plugged in.
+ *
+ * Without this it loops. Leaving setup is a software restart, the cable is
+ * still attached, and the watcher on the next boot sees exactly what it saw the
+ * first time: a computer. So "Done & restart" put the module straight back into
+ * setup, over and over, and the only way out was to unplug it.
+ *
+ * The reset reason separates the two cases exactly, with nothing to store and
+ * nothing to get stuck:
+ *
+ *   plugged in        ESP_RST_POWERON   -> watch, and enter setup
+ *   left setup        ESP_RST_SW        -> do not
+ *   entered setup     ESP_RST_SW        -> do not (config mode never starts it)
+ *   crash / watchdog  ESP_RST_PANIC etc -> do not, which also stops a boot
+ *                                          loop from being one into setup
+ *
+ * Unplugging cuts the power, so the next plug-in is a power-on again and the
+ * module offers setup once more. That is the behaviour asked for, and it falls
+ * out of the reset reason rather than being maintained. */
+static void usb_setup_watch_start(void)
+{
+    esp_reset_reason_t r = esp_reset_reason();
+    if (r != ESP_RST_POWERON) {
+        ESP_LOGI(TAG, "reset reason %d, not a power-on -- USB will not open setup "
+                      "until the cable is unplugged and back in", (int)r);
+        return;
+    }
+    xTaskCreate(usb_setup_watch_task, "usbwatch", 3072, NULL, 2, NULL);
+}
+
+#else  /* !SOC_USB_SERIAL_JTAG_SUPPORTED */
+
 /* The original ESP32 has no USB peripheral at all, so there is no cable to
- * detect and the button remains the way in. */
-static bool usb_host_present(void) { return false; }
+ * detect and the button remains the only way in. */
+static void usb_setup_watch_start(void) { }
+
 #endif
 
 /* -------------------------------------------------------------------------- */
@@ -561,18 +659,7 @@ void app_main(void)
 
     /* Consumed on read: config mode lasts exactly one boot, so a module can
      * never be left stuck in it. */
-    bool want_config = webcfg_boot_flag_take();
-
-    /* ...or a computer is on the other end of the USB cable. Not consumed on
-     * read, because it is not stored -- unplug the cable and the next boot is
-     * a normal one, which gives this the same "cannot get stuck" property the
-     * flag has. */
-    if (!want_config && usb_host_present()) {
-        ESP_LOGW(TAG, "a computer is on the USB cable -- starting in setup");
-        want_config = true;
-    }
-
-    if (want_config) {
+    if (webcfg_boot_flag_take()) {
         config_mode();
         return;
     }
@@ -622,6 +709,11 @@ void app_main(void)
     xTaskCreate(ui_task_update,     "uiled", 2560, NULL, 2, NULL);
 
     ESP_LOGI(TAG, "tasks started");
+
+    /* Last, and only on a normal boot: a computer on the USB cable means this
+     * module is being set up rather than flown. Started after everything else
+     * so it costs a module wired to a flight controller nothing at all. */
+    usb_setup_watch_start();
 
     /* Deliberately last, and deliberately NOT in config mode: a new image has
      * to reach full normal operation before it is allowed to keep itself. */
