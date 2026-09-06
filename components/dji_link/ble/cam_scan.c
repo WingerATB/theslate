@@ -76,7 +76,7 @@ static esp_ble_scan_params_t s_scan_params = {
  * Only codes with a source are named. An unrecognised camera still appears in
  * the picker with its advertised name and MAC -- a mislabelled camera is worse
  * than an unlabelled one, and guessing at a code would produce exactly that. */
-static uint8_t model_code(const uint8_t *adv, uint8_t adv_len)
+static uint8_t dji_model_code(const uint8_t *adv, uint8_t adv_len)
 {
     for (int i = 0; i < adv_len; ) {
         const uint8_t len = adv[i];
@@ -90,8 +90,10 @@ static uint8_t model_code(const uint8_t *adv, uint8_t adv_len)
     return 0;
 }
 
-const char *cam_scan_model_name(uint8_t model)
+const char *cam_scan_model_name(uint8_t vendor, uint8_t model)
 {
+    if (vendor == CAM_VENDOR_GOPRO) return cam_gopro_model_name(model);
+
     switch (model) {
     case 0x12: return "Osmo Action 3";
     case 0x14: return "Osmo Action 4";
@@ -105,7 +107,8 @@ const char *cam_scan_model_name(uint8_t model)
     }
 }
 
-static void upsert(const uint8_t *bda, const char *name, int8_t rssi, uint8_t model)
+static void upsert(uint8_t vendor, const uint8_t *bda, const char *name,
+                   int8_t rssi, uint8_t model)
 {
     if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return;
 
@@ -139,9 +142,10 @@ static void upsert(const uint8_t *bda, const char *name, int8_t rssi, uint8_t mo
         ESP_LOGI(TAG, "found %02X:%02X:%02X:%02X:%02X:%02X  %-18s model=0x%02X %-18s %d dBm",
                  bda[0], bda[1], bda[2], bda[3], bda[4], bda[5],
                  (name && name[0]) ? name : "(no name)",
-                 model, cam_scan_model_name(model), rssi);
+                 model, cam_scan_model_name(vendor, model), rssi);
     }
 
+    s_tbl[slot].vendor  = vendor;
     s_tbl[slot].rssi    = rssi;
     s_tbl[slot].last_ms = now;
     if (model) s_tbl[slot].model = model;
@@ -220,7 +224,10 @@ static void gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
         /* Counted BEFORE the camera filter: any advert at all proves the radio
          * is still listening, which is the only thing the watchdog needs. */
         s_last_result_ms = scan_now_ms();
-        if (!bsp_link_is_dji_camera_adv(param)) break;
+        /* SLATE: any camera vendor we know, so the picker can show a DJI and
+         * a GoPro in the same list. */
+        cam_vendor_t vendor = camlink_cam_adv_vendor(param);
+        if (vendor == CAM_VENDOR_NONE) break;
 
         uint8_t adv_len = param->scan_rst.adv_data_len + param->scan_rst.scan_rsp_len;
         uint8_t nlen = 0;
@@ -235,8 +242,12 @@ static void gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
             size_t c = nlen < sizeof(name) - 1 ? nlen : sizeof(name) - 1;
             memcpy(name, n, c);
         }
-        upsert(param->scan_rst.bda, name, param->scan_rst.rssi,
-               model_code(param->scan_rst.ble_adv, adv_len));
+        /* Each make numbers its models its own way, so the code is read by
+         * the matcher that understands that make. */
+        uint8_t model = (vendor == CAM_VENDOR_GOPRO)
+                      ? cam_adv_gopro_model(param->scan_rst.ble_adv, adv_len)
+                      : dji_model_code(param->scan_rst.ble_adv, adv_len);
+        upsert(vendor, param->scan_rst.bda, name, param->scan_rst.rssi, model);
         break;
     }
 

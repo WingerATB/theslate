@@ -175,6 +175,35 @@ int main(void)
         CHECK(CAM_WARN_NO_SD   > CAM_WARN_HOT,      "NO_SD outranks HOT");
     }
 
+    printf("11b. a faulty card warns even with no time reading to go on\n");
+    {
+        /* THE CASE THE WARNING EXISTS FOR. A camera with no card has no time
+         * remaining to report, so a warning that only triggered on
+         * "card_s == 0" would go silent exactly when the card is missing. */
+        camlink_warn_in_t in = healthy();
+        in.card_fault = true;
+        in.card_valid = false;          /* nothing to report, because no card */
+        in.card_s = 0;
+        WANT_WARN(in, CAM_WARN_NO_SD, "a card fault warns on its own");
+
+        in = healthy();
+        in.card_valid = true; in.card_s = 0;
+        WANT_WARN(in, CAM_WARN_NO_SD, "and so does a card with no time left");
+
+        in = healthy();
+        in.card_fault = false;
+        WANT_WARN(in, CAM_WARN_NONE, "a healthy card does not");
+    }
+
+    printf("11c. a card fault outranks everything below it\n");
+    {
+        camlink_warn_in_t in = healthy();
+        in.card_fault = true;
+        in.batt_pct = 1;                       /* also flat */
+        in.recording = false; in.want_unmet_long = true;   /* also not recording */
+        WANT_WARN(in, CAM_WARN_NO_SD, "the card comes first");
+    }
+
     printf("\n=== post-roll ===\n\n");
 
     printf("11. off by default: zero seconds changes nothing\n");

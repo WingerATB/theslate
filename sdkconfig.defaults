@@ -19,6 +19,19 @@ CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
 # file made the fallback silent on the one part that needs it stated. It lives
 # in sdkconfig.defaults.<target> instead.
 
+# How many characteristics may be subscribed for notifications at once.
+#
+# The stock value is 5, and it is a FIXED ARRAY in the Bluedroid stack, not a
+# soft limit: the sixth registration returns NO_RESOURCES, raises no event and
+# writes no CCCD, so the channel simply goes quiet with nothing logged.
+#
+# A DJI camera uses three (0xFFF3/4/5). A GoPro needs three of its own -- the
+# command, settings and query response characteristics -- and the blanket
+# subscribe sweep picks up whatever else the camera exposes inside the service,
+# which on some models is one more. Five is exactly on the edge; eight is not.
+# The cost is a few hundred bytes of BSS in the stack.
+CONFIG_BT_GATTC_NOTIF_REG_MAX=8
+
 # A stalled BLE stack must never take the module down in a way that leaves a
 # clip running; let the watchdog reset us instead.
 CONFIG_ESP_TASK_WDT_INIT=y

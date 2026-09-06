@@ -36,7 +36,7 @@ cd "$(dirname "$0")/.."
 # Not here, and why: the C2 compiles and runs out of RAM when both radios come
 # up, which is worse than a link error because it gets as far as a flashable
 # image. The S2 has no Bluetooth, the H2/H21/H4 no Wi-Fi and the P4 no radios.
-# See docs/COMPATIBILITY.md.
+# The C3 Supermini is the reference board; the rest are beta.
 TARGETS=(esp32c3 esp32s3 esp32c6 esp32c61 esp32c5 esp32)
 [ $# -gt 0 ] && TARGETS=("$@")
 

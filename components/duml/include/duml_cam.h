@@ -15,6 +15,7 @@
 #include <stdbool.h>
 
 #include "cam_bind.h"
+#include "camvendor.h"
 
 #define DUML_CAM_STALE_MS 1500
 
@@ -34,9 +35,29 @@ typedef struct {
     uint32_t free_mb;        /* SD free space                                */
     uint32_t left_s;         /* recording time remaining                     */
 
+    /* Per-field confirmation.
+     *
+     * status_valid alone says the camera is talking; these say WHICH of the
+     * things it said. A DJI camera sends them all in one frame, so it sets all
+     * of these together. A GoPro pushes only what changed, so it may be
+     * reporting a battery level and nothing about the card -- and flattening
+     * that into one flag would render a card time of zero, which the warning
+     * ladder reads as NO SD, on a camera with a perfectly good card in it. */
+    bool     clip_valid;
+    bool     left_valid;
+
     uint8_t  work_mode;      /* 0 TAKEPHOTO, 1 RECORD, 2 PLAYBACK, ...       */
     uint8_t  battery_pct;    /* CANDIDATE -- not confirmed by measurement    */
     bool     battery_valid;
+
+    /* The card cannot be recorded to: missing, unformatted, full or errored.
+     * Reported SEPARATELY from the time-remaining reading on purpose. Blanking
+     * the reading to signal a fault would also silence the warning that exists
+     * for the fault, which is precisely backwards. DJI's DUML path leaves this
+     * false; a GoPro reports it directly. */
+    bool     card_fault;
+    bool     hot;            /* overheating; a GoPro reports this as a plain
+                              * boolean that can be true WHILE RECORDING      */
 
     /* Short name for the OSD: NANO, O360, A5... Resolved when the camera was
      * chosen and stored with the binding, because the advertised name -- the
@@ -66,7 +87,8 @@ bool duml_cam_bind_get(int i, cam_bind_t *out);   /* i = 0 is top priority */
 
 /* Add a camera the user picked, at the end of the list. Re-adding one already
  * held refreshes it and keeps its position. False when the list is full. */
-bool duml_cam_bind_add(const uint8_t addr[6], uint8_t model, const char *name);
+bool duml_cam_bind_add(cam_vendor_t vendor, const uint8_t addr[6], uint8_t model,
+                       const char *name);
 
 bool duml_cam_bind_forget(const uint8_t addr[6]);
 

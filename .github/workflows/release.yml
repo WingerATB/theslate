@@ -113,7 +113,16 @@ jobs:
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           ls -l dist
 
-          cat > notes.md <<'EOF'
+          # The release notes come from the ANNOTATED TAG. Write them once, at
+          # the moment the version is cut, and they land here verbatim -- a
+          # lightweight tag gets the generic text below and nothing else.
+          : > notes.md
+          BODY="$(git tag -l --format='%(contents)' "$TAG")"
+          if [ -n "$BODY" ]; then
+            printf '%s\n\n---\n\n' "$BODY" >> notes.md
+          fi
+
+          cat >> notes.md <<'EOF'
           ## Which file do I want?
 
           | | |
@@ -127,8 +136,15 @@ jobs:
           If you have a C3 Supermini — which is what this ships on — that is
           `esp32c3`.
 
-          **Only the C3 has flown.** The other images build, link and fit, and
-          nobody has bound a camera with one. See `docs/COMPATIBILITY.md`.
+          The **ESP32-C3 Supermini is the reference board.** The S3, C6, C61,
+          C5 and original ESP32 images are **beta**.
+
+          **GoPro support is new in 1.2 and in beta** — HERO9 through HERO13
+          Black, HERO11 Black Mini, MAX 2, MISSION 1 and MISSION 1 Pro. It is
+          written to GoPro's published Open GoPro spec and checked byte for
+          byte against GoPro's own SDK. Whatever you fly, the serial log says
+          exactly what happened — an issue with it attached is the most useful
+          thing you can send.
           EOF
 
           gh release create "$TAG" dist/*.bin \

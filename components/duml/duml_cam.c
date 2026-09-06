@@ -20,6 +20,8 @@
 #include "command_logic.h"
 #include "nvs_flash.h"
 #include "cam_bind.h"
+#include "camvendor.h"
+#include "gopro_cam.h"
 #include "esp_mac.h"
 #include "nvs.h"
 
@@ -88,7 +90,7 @@ static uint32_t           s_last_batt_ms;
  * Unknown models default to DUML because that is the path this project proved
  * first and understands best -- and because a wrong guess there fails visibly
  * at connect rather than silently at record time. */
-typedef enum { CAM_PROTO_DUML = 0, CAM_PROTO_RSDK = 1 } cam_proto_t;
+/* cam_proto_t now lives in cam_bind.h, beside the binding that stores it. */
 
 /* Model code first, advertised name second.
  *
@@ -102,8 +104,10 @@ typedef enum { CAM_PROTO_DUML = 0, CAM_PROTO_RSDK = 1 } cam_proto_t;
  * model: "Osmo360-8ED9", "OsmoNano-673E", so an Action advertises
  * "OsmoAction...". That covers Action 6 and whatever follows it without
  * needing a code at all. */
-static cam_proto_t proto_for_camera(uint8_t model, const char *name)
+static cam_proto_t proto_for_camera(cam_vendor_t vendor, uint8_t model, const char *name)
 {
+    if (vendor == CAM_VENDOR_GOPRO) return CAM_PROTO_GOPRO;
+
     switch (model) {
     case 0x12:   /* Osmo Action 3      */
     case 0x14:   /* Osmo Action 4      */
@@ -128,8 +132,10 @@ static char        s_label[6] = "CAM";
 /* Four characters at most: that is what a row can spare for a camera name
  * beside anything else worth showing. Long enough for O360 and NANO, which is
  * the distinction that actually matters on a bench with two cameras on it. */
-static void label_for_camera(uint8_t model, const char *name, char out[6])
+static void label_for_camera(cam_vendor_t vendor, uint8_t model, const char *name, char out[6])
 {
+    if (vendor == CAM_VENDOR_GOPRO) { cam_gopro_label(model, out); return; }
+
     const char *by_model = NULL;
     switch (model) {
     case 0x12: by_model = "A3";   break;
@@ -254,14 +260,14 @@ static void bind_load_locked(void)
              * name as well as its model code. The name is gone by now, so the
              * decision is read back rather than recomputed. */
             c.proto = (nvs_get_u8(h, NVS_KEY_PROTO, &pr) == ESP_OK)
-                          ? pr : (uint8_t)proto_for_camera(m, NULL);
+                          ? pr : (uint8_t)proto_for_camera(CAM_VENDOR_DJI, m, NULL);
             size_t ll = sizeof(c.label);
             if (nvs_get_str(h, NVS_KEY_LABEL, c.label, &ll) != ESP_OK) {
                 /* Bound by a firmware that predates the label. The model code
                  * is enough for every camera whose code is known -- all of them
                  * except the Action 6, which loses its digit until it is next
                  * picked in setup. */
-                label_for_camera(m, NULL, c.label);
+                label_for_camera(CAM_VENDOR_DJI, m, NULL, c.label);
             }
             s_binds.n = 1;
             s_binds.e[0] = c;
@@ -312,14 +318,14 @@ bool duml_cam_bind_get(int i, cam_bind_t *out)
     return ok;
 }
 
-bool duml_cam_bind_add(const uint8_t addr[6], uint8_t model, const char *name)
+bool duml_cam_bind_add(cam_vendor_t vendor, const uint8_t addr[6], uint8_t model, const char *name)
 {
     if (addr == NULL) return false;
     cam_bind_t c = {0};
     memcpy(c.addr, addr, 6);
     c.model = model;
-    c.proto = (uint8_t)proto_for_camera(model, name);
-    label_for_camera(model, name, c.label);
+    c.proto = (uint8_t)proto_for_camera(vendor, model, name);
+    label_for_camera(vendor, model, name, c.label);
 
     binds_ready();
     binds_lock();
@@ -479,6 +485,43 @@ void duml_cam_get(duml_cam_status_t *out)
     strlcpy(out->label, s_label, sizeof(out->label));
 
     uint32_t t = now_ms();
+
+    /* The staleness rule belongs to whichever protocol is attached, because
+     * the two mean different things by silence.
+     *
+     * A DJI camera streams its status channel at 2 Hz, so silence is a fault
+     * and ages the reading out after 1.5 s. A GoPro pushes ONLY WHEN SOMETHING
+     * CHANGES -- a camera sitting idle has nothing to say and says nothing, for
+     * minutes at a time -- so the same rule would blank a perfectly healthy
+     * camera to NO CAM within two seconds of connecting. There, the link going
+     * down is the failure signal, and BLE reports that within seconds.
+     *
+     * So the GoPro branch publishes its own validity and this must not
+     * recompute it from timestamps only the DUML notify path ever stamps. */
+    if (s_proto == CAM_PROTO_GOPRO) {
+        /* Published by the session -- but still gated on the link, exactly as
+         * the DUML branch below is.
+         *
+         * Without this the readings survive the camera. Nothing above ages
+         * them out on its own: camlink only starts its own three-second timer
+         * once status_valid goes false, so a status that stays "valid" after
+         * the camera is gone keeps refreshing that timer and the OSD holds a
+         * frozen REC 01:23 for the rest of the flight. The whole point of
+         * carrying validity flags is that the pilot is never shown a reading
+         * the module cannot currently vouch for. */
+        out->status_valid = s_st.status_valid && out->link_up;
+        if (!out->status_valid) {
+            out->rec_state     = DUML_REC_IDLE;
+            out->clip_valid    = false;
+            out->left_valid    = false;
+            out->battery_valid = false;
+            out->card_fault    = false;
+            out->hot           = false;
+        }
+        xSemaphoreGive(s_lock);
+        return;
+    }
+
     out->status_age_ms = (s_last_status_ms == 0) ? UINT32_MAX : (t - s_last_status_ms);
     out->status_valid  = (s_last_status_ms != 0) &&
                          (out->status_age_ms < DUML_CAM_STALE_MS) &&
@@ -486,6 +529,19 @@ void duml_cam_get(duml_cam_status_t *out)
     out->work_mode = s_st.work_mode;
     out->battery_valid = (s_last_batt_ms != 0) &&
                          ((t - s_last_batt_ms) < 5000) && out->link_up;
+    /* A DJI status frame carries every field at once, so their confirmation is
+     * the frame's confirmation. */
+    out->clip_valid = out->status_valid;
+    out->left_valid = out->status_valid;
+
+    /* Cleared, not left alone. These are only ever written by the GoPro
+     * branch, and s_st outlives a session -- so without this a GoPro's card
+     * fault or overheat would follow the module into its next connection with
+     * a DJI camera and could never clear, because nothing on that path
+     * reports either. */
+    out->card_fault = false;
+    out->hot        = false;
+
     if (!out->status_valid) {
         /* Do not hand back frozen values dressed up as current ones. */
         out->rec_state = DUML_REC_IDLE;
@@ -657,6 +713,11 @@ static void cam_task(void *arg)
     }
     bind_load();
 
+    /* Tell the transport what a GoPro's GATT looks like. Registered once, up
+     * front, because the scan decides which camera won inside the connect call
+     * and there is no later moment to answer the question. */
+    gopro_cam_select();
+
     for (;;) {
         int nbind = duml_cam_bind_count();
 
@@ -744,6 +805,79 @@ static void cam_task(void *arg)
          * over. Switching would end a recording in progress to satisfy a
          * preference, and priority is about who gets picked up, not who gets
          * put down. */
+
+        /* ---- the vendor fork -------------------------------------------
+         *
+         * Everything above here is shared: the scan saw every camera that was
+         * switched on, ranked them by the user's priority order, connected and
+         * bonded. Everything below is the protocol, and a GoPro shares none of
+         * it -- not the pairing, not the framing, not the commands.
+         *
+         * The DJI branch is exactly what it always was. */
+        if (s_proto == CAM_PROTO_GOPRO) {
+            if (!gopro_cam_session_start(s_bound_model)) {
+                ESP_LOGE(TAG, "GoPro session failed; dropping the link to retry");
+                gopro_cam_session_end();
+                connect_logic_ble_disconnect();
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                continue;
+            }
+            if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+                s_st.link_up = true;
+                xSemaphoreGive(s_lock);
+            }
+
+            while (connect_logic_get_state() >= BLE_CONNECTED) {
+                gopro_cam_tick();
+
+                if (s_req_pending) {
+                    bool on = s_req_value;
+                    s_req_pending = false;
+                    gopro_cam_request_record(on);
+                }
+
+                /* Republish into the shared status so camlink, the OSD and the
+                 * record state machine cannot tell which kind of camera is on
+                 * the other end. */
+                gopro_cam_status_t g;
+                gopro_cam_get(&g);
+                if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+                    s_st.link_up       = true;
+                    s_st.status_valid  = g.status_valid;
+                    s_st.status_age_ms = g.status_age_ms;
+                    s_st.rec_state     = g.recording ? DUML_REC_RECORDING : DUML_REC_IDLE;
+                    s_st.clip_s        = g.clip_s;
+                    s_st.left_s        = g.left_s;
+                    s_st.battery_pct   = g.battery_pct;
+                    s_st.battery_valid = g.battery_valid;
+                    s_st.card_fault    = g.card_fault;
+                    s_st.clip_valid    = g.clip_valid;
+                    s_st.left_valid    = g.left_valid;
+                    s_st.hot           = g.hot;
+                    xSemaphoreGive(s_lock);
+                }
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+
+            gopro_cam_session_end();
+            if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+                /* The whole reading goes, not just the link flag. s_st
+                 * outlives the session, and a leftover card fault or overheat
+                 * would follow the module into its next connection -- to a
+                 * different camera, possibly a DJI one that never reports
+                 * either and so could never clear it. */
+                s_st.link_up       = false;
+                s_st.status_valid  = false;
+                s_st.rec_state     = DUML_REC_IDLE;
+                s_st.clip_valid    = false;
+                s_st.left_valid    = false;
+                s_st.battery_valid = false;
+                s_st.card_fault    = false;
+                s_st.hot           = false;
+                xSemaphoreGive(s_lock);
+            }
+            continue;
+        }
 
         /* Pairing is DUML on every camera: it is what puts the PIN prompt on
          * the screen, and the Osmo 360 answers it even though it refuses every

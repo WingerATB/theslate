@@ -44,3 +44,5 @@ preview.html
 releases/*.bin
 
 .DS_Store
+# Local cross-target checks (idf.py -B build-check-<target>).
+build-check-*/

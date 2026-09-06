@@ -129,22 +129,41 @@ void camlink_poll_camera(void)
     s_cam.recording       = (d.rec_state == DUML_REC_RECORDING);
     s_cam.recording_valid = d.status_valid;
 
+    /* Per field, not per frame. A camera that is talking is not necessarily
+     * talking about the card -- and a card time of zero that the camera never
+     * sent would read as NO SD on a perfectly good card. */
     s_cam.record_time_s     = d.clip_s;
-    s_cam.record_time_valid = d.status_valid;
+    s_cam.record_time_valid = d.status_valid && d.clip_valid;
 
     s_cam.remain_time_s     = d.left_s;
-    s_cam.remain_time_valid = d.status_valid;
+    s_cam.remain_time_valid = d.status_valid && d.left_valid;
 
     s_cam.battery_pct   = d.battery_pct;
     s_cam.battery_valid = d.battery_valid;
+
+    s_cam.card_fault       = d.card_fault;
+    s_cam.card_fault_valid = d.status_valid;
 
     /* Which camera is bound is known whether or not it is answering, so this
      * is copied unconditionally -- unlike every reading around it. */
     memcpy(s_cam.label, d.label, sizeof(s_cam.label));
 
-    /* DUML exposes no overheat field yet, so this slot stays unconfirmed
-     * rather than being faked as "temperature normal". */
-    s_cam.temp_over_valid = false;
+    /* DUML exposes no overheat field, so on a DJI camera this stays
+     * unconfirmed rather than being faked as "temperature normal". A GoPro
+     * does report it, as a plain boolean.
+     *
+     * Mapped to level 1 while recording and level 2 while not. The ladder
+     * treats 2 and above as "cannot record", and a GoPro's flag can be true
+     * while it is filming perfectly happily -- so promoting it unconditionally
+     * would blink CAM HOT over a working recording and invite the pilot to
+     * abort a good pack. */
+    if (d.hot) {
+        s_cam.temp_over       = (d.rec_state == DUML_REC_RECORDING) ? 1 : 2;
+        s_cam.temp_over_valid = d.status_valid;
+    } else {
+        s_cam.temp_over       = 0;
+        s_cam.temp_over_valid = false;
+    }
 
     if (d.status_valid) {
         s_cam.last_update_ms = now_ms();
@@ -166,6 +185,7 @@ void camlink_set_connected(bool connected)
         s_cam.remain_time_valid = false;
         s_cam.battery_valid     = false;
         s_cam.temp_over_valid   = false;
+        s_cam.card_fault_valid  = false;
     }
     xSemaphoreGive(s_cam_lock);
 }
@@ -458,6 +478,7 @@ void camlink_logic_task(void *arg)
             .temp_over       = cam.temp_over,
             .card_valid      = cam.remain_time_valid,
             .card_s          = cam.remain_time_s,
+            .card_fault      = cam.card_fault_valid && cam.card_fault,
             .batt_valid      = cam.battery_valid,
             .batt_pct        = cam.battery_pct,
             .warn_batt_pct   = cfg.warn_batt_pct,

@@ -27,6 +27,8 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "camvendor.h"
+
 /* How many cameras a module may hold.
  *
  * Bounded by the time a sweep costs, not by storage: every camera that is
@@ -40,11 +42,34 @@
  * so its fields may only ever be APPENDED -- the same discipline camlink_cfg_t
  * documents, for the same reason: reordering it silently repoints every
  * shipped module at a different camera. */
+/* Which protocol to speak to a bound camera.
+ *
+ * Stored in NVS as part of cam_bind_t, so this is APPEND ONLY -- renumbering
+ * it would point every shipped module's bindings at the wrong protocol, which
+ * presents as a camera that connects perfectly and then ignores every command.
+ * The values are declared here rather than in duml_cam.h because the binding
+ * carries them and the binding is what outlives any one session. */
+typedef enum {
+    CAM_PROTO_DUML  = 0,   /* Osmo Nano, Osmo Pocket                        */
+    CAM_PROTO_RSDK  = 1,   /* Osmo Action series, Osmo 360                  */
+    CAM_PROTO_GOPRO = 2,   /* Open GoPro, HERO 9 and newer                  */
+} cam_proto_t;
+
+/* Which make speaks a protocol. The binding stores the protocol rather than
+ * the vendor, because the protocol is the thing that actually has to be got
+ * right on the wire -- but the settings page wants to name the make, so the
+ * one is derived from the other rather than stored twice and allowed to
+ * disagree. */
+static inline cam_vendor_t cam_vendor_of_proto(uint8_t proto)
+{
+    return (proto == CAM_PROTO_GOPRO) ? CAM_VENDOR_GOPRO : CAM_VENDOR_DJI;
+}
+
 typedef struct {
     uint8_t addr[6];
     uint8_t model;      /* advertised model code; 0 when unknown            */
     uint8_t proto;      /* cam_proto_t, resolved when the camera was picked */
-    char    label[6];   /* NANO / O360 / A5 -- for the OSD                  */
+    char    label[6];   /* NANO / O360 / A5 / GP12 -- for the OSD           */
 } cam_bind_t;
 
 typedef struct {

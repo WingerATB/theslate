@@ -26,6 +26,7 @@
 #include "esp_err.h"
 #include "esp_gatt_defs.h"
 #include "esp_gattc_api.h"
+#include "camvendor.h"
 #include "esp_gap_ble_api.h"
 
 /* Connection status structure */
@@ -172,6 +173,91 @@ const char *camlink_ble_fault_text(uint8_t reason);
 void camlink_rsdk_autoreply(const uint8_t *frame, size_t len);
 void camlink_rsdk_set_autoreply(bool on);
 bool ble_has_bound_addr(void);
+
+/* ===================== SLATE ADDITION ===================================
+ * Vendor-aware transport.
+ *
+ * Scanning, connecting and bonding are the same job whoever made the camera,
+ * so they stay here and stay shared -- there is one BLE controller, and the
+ * priority scan has to see a DJI camera and a GoPro in the same window. What
+ * differs per vendor is only WHICH service and characteristics to look for,
+ * and that is described by a profile the session layer installs before the
+ * connect.
+ *
+ * DJI keeps its existing behaviour exactly: one channel, 16-bit UUIDs, and the
+ * same scalar handles the vendored code has always used.
+ * ========================================================================= */
+#define BLE_CHAN_MAX  4
+
+/* One request/response pair. DJI has a single pair; GoPro has three (command,
+ * settings and query), which is the reason this is a table rather than the two
+ * scalars it replaces. */
+typedef struct {
+    esp_bt_uuid_t write;
+    esp_bt_uuid_t notify;
+} ble_chan_uuid_t;
+
+typedef struct {
+    const char     *name;
+    esp_bt_uuid_t   service;
+    ble_chan_uuid_t chan[BLE_CHAN_MAX];
+    uint8_t         n_chan;
+} ble_gatt_profile_t;
+
+/* Which vendor made this advertisement, or CAM_VENDOR_NONE. The DJI arm is the
+ * original bsp_link_is_dji_camera_adv() unchanged. */
+cam_vendor_t camlink_cam_adv_vendor(esp_ble_gap_cb_param_t *scan_result);
+
+/* The vendor of the camera the last scan chose. Known BEFORE the connect is
+ * issued, which is what lets the session layer install the right profile and
+ * the right notify handler rather than discovering the vendor afterwards. */
+cam_vendor_t ble_selected_vendor(void);
+
+/* Declare which GATT layout a vendor's cameras use.
+ *
+ * REGISTERED RATHER THAN SET, because of an ordering problem: discovery runs
+ * as part of connecting, but which camera won the scan is only decided inside
+ * that same call. There is no moment between "we know it is a GoPro" and "we
+ * must know which characteristics to look for" in which a caller could set it.
+ * So each vendor declares its layout once at start-up and the transport picks
+ * the right one the instant the scan chooses an address.
+ *
+ * It also keeps the dependency pointing one way: the GoPro component registers
+ * its profile with the transport, and the transport knows nothing about GoPro. */
+void ble_register_vendor_profile(cam_vendor_t vendor, const ble_gatt_profile_t *profile);
+
+/* Per-channel handles found during discovery. 0 when not found. */
+uint16_t ble_chan_write_handle(int chan);
+uint16_t ble_chan_notify_handle(int chan);
+
+/* Which channel a notification arrived on, or -1 for a handle we did not
+ * register. A protocol with three notify characteristics cannot tell its
+ * command replies from its status pushes without this. */
+int ble_chan_of_notify_handle(uint16_t handle);
+
+/* Have all of the profile's notify channels had their CCCD write acknowledged?
+ *
+ * Not cosmetic: a GoPro silently drops a command written before its command
+ * response channel is subscribed -- the reply simply never arrives and the
+ * session hangs waiting for it. */
+bool ble_channels_ready(void);
+
+/* One channel's own answer to that question. Exists so a session that gives up
+ * can say WHICH channel never came up: "not all channels subscribed" sends
+ * somebody looking at the whole camera, where "channel 2 has no handle" and
+ * "channel 2 was found but never acknowledged its CCCD" are different faults
+ * with different causes. */
+bool ble_chan_subscribed(int chan);
+
+/* Write to one channel, choosing write-with-response or without from THAT
+ * characteristic's own properties rather than from a single global byte. */
+esp_err_t ble_chan_write(int chan, const uint8_t *data, size_t len);
+
+/* A notify callback that is told where the data came from. Takes precedence
+ * over ble_set_notify_callback() when set; pass NULL to go back to the
+ * handle-less one. */
+typedef void (*ble_notify_h_callback_t)(uint16_t handle, const uint8_t *data, size_t len);
+void ble_set_notify_handle_callback(ble_notify_h_callback_t cb);
 
 esp_err_t ble_write_raw(uint16_t handle, const uint8_t *data, size_t length, bool with_response);
 

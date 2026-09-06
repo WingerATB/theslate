@@ -21,5 +21,5 @@ idf_component_register(
          "utils/crc/custom_crc16.c"
          "utils/crc/custom_crc32.c"
     INCLUDE_DIRS "ble" "data" "protocol" "logic" "utils/crc"
-    REQUIRES bt esp_timer board
+    REQUIRES bt esp_timer board camvendor
     PRIV_REQUIRES nvs_flash)

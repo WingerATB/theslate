@@ -50,6 +50,27 @@ static bool s_connecting = false;
 /* 全局保存的 Notify 回调 */
 static ble_notify_callback_t s_notify_cb = NULL;
 
+/* SLATE ADDITION: vendor-aware transport state. See the block in ble.h. */
+static ble_notify_h_callback_t s_notify_h_cb = NULL;
+static cam_vendor_t            s_sel_vendor  = CAM_VENDOR_NONE;
+
+typedef struct {
+    uint16_t write_h;
+    uint8_t  write_props;
+    uint16_t notify_h;
+    uint16_t cccd_h;       /* the CCCD's own handle, so its write ack can be
+                            * mapped back to this channel -- the ack event
+                            * carries the DESCRIPTOR handle, not the
+                            * characteristic's */
+    bool     subscribed;   /* CCCD write acknowledged by the camera */
+} ble_chan_state_t;
+static ble_chan_state_t s_chan[BLE_CHAN_MAX];
+
+static void ble_chans_reset(void)
+{
+    memset(s_chan, 0, sizeof(s_chan));
+}
+
 /* Why the camera link is not up, kept for the settings page.
  *
  * A module that cannot connect currently says nothing about why, so every
@@ -125,6 +146,8 @@ static bool s_found_previous_device = false;  // Whether the original device was
 static uint8_t s_bound_list[BLE_BOUND_MAX][6];
 static int     s_bound_n   = 0;
 static int     best_pri    = INT_MAX;
+static bool    best_asleep = false;   /* the winner is a camera we would have
+                                       * to wake -- see the ranking note      */
 
 /* Index of this address in the bound list, or -1. */
 static int bound_index_of(const uint8_t *bda)
@@ -162,15 +185,69 @@ ble_profile_t s_ble_profile = {
 #define REMOTE_NOTIFY_CHAR_UUID      0xFFF4
 #define REMOTE_WRITE_CHAR_UUID       0xFFF5
 
-static esp_bt_uuid_t s_filter_notify_char_uuid = {
-    .len = ESP_UUID_LEN_16,
-    .uuid.uuid16 = REMOTE_NOTIFY_CHAR_UUID,
-};
+/* SLATE PATCH: s_filter_notify_char_uuid / s_filter_write_char_uuid removed.
+ * Discovery reads the active profile's channel table instead, and the DJI
+ * profile below is built from the same three constants these were, so nothing
+ * about which characteristics DJI looks for has changed. */
 
-static esp_bt_uuid_t s_filter_write_char_uuid = {
-    .len = ESP_UUID_LEN_16,
-    .uuid.uuid16 = REMOTE_WRITE_CHAR_UUID,
+/* Compare two UUIDs REGARDLESS OF THE WIDTH EACH IS EXPRESSED IN.
+ *
+ * A 16-bit SIG-assigned UUID and its 128-bit expansion under the Bluetooth
+ * base are the same UUID, and which of the two a stack hands back depends on
+ * how the remote device encoded its own attribute table. GoPro's service is
+ * SIG-assigned 0xFEA6, so a plain length-then-value comparison is one
+ * discovery quirk away from "service not found" on a camera that is sitting
+ * there working -- and that failure would show up as a link that connects and
+ * never says anything. Widen both sides and compare the bytes. */
+static void camlink_uuid_to128(const esp_bt_uuid_t *u, uint8_t out[16])
+{
+    static const uint8_t base[16] = {   /* 00000000-0000-1000-8000-00805F9B34FB */
+        0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80,
+        0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    switch (u->len) {
+    case ESP_UUID_LEN_128:
+        memcpy(out, u->uuid.uuid128, 16);
+        break;
+    case ESP_UUID_LEN_32:
+        memcpy(out, base, 16);
+        out[12] = (uint8_t)(u->uuid.uuid32 & 0xFF);
+        out[13] = (uint8_t)((u->uuid.uuid32 >> 8) & 0xFF);
+        out[14] = (uint8_t)((u->uuid.uuid32 >> 16) & 0xFF);
+        out[15] = (uint8_t)((u->uuid.uuid32 >> 24) & 0xFF);
+        break;
+    default:
+        memcpy(out, base, 16);
+        out[12] = (uint8_t)(u->uuid.uuid16 & 0xFF);
+        out[13] = (uint8_t)(u->uuid.uuid16 >> 8);
+        break;
+    }
+}
+
+static bool camlink_uuid_eq(const esp_bt_uuid_t *a, const esp_bt_uuid_t *b)
+{
+    uint8_t x[16], y[16];
+    camlink_uuid_to128(a, x);
+    camlink_uuid_to128(b, y);
+    return memcmp(x, y, 16) == 0;
+}
+
+/* The DJI profile, built from the constants above so it cannot drift from
+ * them. One channel: notify 0xFFF4, write 0xFFF5, service 0xFFF0 -- exactly
+ * what this file has always looked for. */
+static const ble_gatt_profile_t s_dji_profile = {
+    .name    = "DJI",
+    .service = { .len = ESP_UUID_LEN_16, .uuid.uuid16 = REMOTE_TARGET_SERVICE_UUID },
+    .chan    = { { .write  = { .len = ESP_UUID_LEN_16, .uuid.uuid16 = REMOTE_WRITE_CHAR_UUID },
+                   .notify = { .len = ESP_UUID_LEN_16, .uuid.uuid16 = REMOTE_NOTIFY_CHAR_UUID } } },
+    .n_chan  = 1,
 };
+/* Registered per vendor; DJI is built in, so a build with no other vendor
+ * behaves exactly as this file always has. s_profile is whichever of these the
+ * scan's winner calls for, latched when the connection is opened. */
+static const ble_gatt_profile_t *s_vendor_profile[CAM_VENDOR_GOPRO + 1] = {
+    [CAM_VENDOR_DJI] = &s_dji_profile,
+};
+static const ble_gatt_profile_t *s_profile = &s_dji_profile;
 
 static esp_bt_uuid_t s_notify_descr_uuid = {
     .len = ESP_UUID_LEN_16,
@@ -630,6 +707,7 @@ esp_err_t ble_start_scanning_and_connect(void) {
     memset(best_addr, 0, sizeof(esp_bd_addr_t));
     best_rssi = -128;
     best_pri  = INT_MAX;   /* SLATE: nothing chosen yet this window */
+    best_asleep = false;
     memset(s_remote_device_name, 0, ESP_BLE_ADV_NAME_LEN_MAX);
     s_is_reconnecting = false;
     s_found_previous_device = false;
@@ -940,6 +1018,82 @@ esp_err_t ble_unregister_notify(uint16_t conn_id, uint16_t char_handle) {
  * @param cb Callback function pointer
  *           回调函数指针
  */
+void ble_register_vendor_profile(cam_vendor_t v, const ble_gatt_profile_t *profile)
+{
+    if (v <= CAM_VENDOR_NONE || v > CAM_VENDOR_GOPRO) return;
+    s_vendor_profile[v] = profile;
+    ESP_LOGI(TAG, "vendor %d: GATT profile \"%s\" (%u channel%s)", (int)v,
+             profile ? profile->name : "(none)",
+             profile ? (unsigned)profile->n_chan : 0u,
+             (profile && profile->n_chan == 1) ? "" : "s");
+}
+
+/* Latch the profile for this connection. Called the moment the scan has chosen
+ * an address, which is the earliest point at which the vendor is known and the
+ * latest at which the answer is still needed. */
+static void ble_latch_profile(void)
+{
+    const ble_gatt_profile_t *p = NULL;
+    if (s_sel_vendor > CAM_VENDOR_NONE && s_sel_vendor <= CAM_VENDOR_GOPRO) {
+        p = s_vendor_profile[s_sel_vendor];
+    }
+    if (p == NULL) p = &s_dji_profile;   /* the reconnect path, and anything
+                                          * that got here without a scan */
+    s_profile = p;
+    ESP_LOGI(TAG, "using the %s GATT profile", s_profile->name);
+}
+
+cam_vendor_t ble_selected_vendor(void) { return s_sel_vendor; }
+
+uint16_t ble_chan_write_handle(int c)
+{
+    return (c >= 0 && c < BLE_CHAN_MAX) ? s_chan[c].write_h : 0;
+}
+uint16_t ble_chan_notify_handle(int c)
+{
+    return (c >= 0 && c < BLE_CHAN_MAX) ? s_chan[c].notify_h : 0;
+}
+
+int ble_chan_of_notify_handle(uint16_t h)
+{
+    for (int i = 0; i < BLE_CHAN_MAX; i++) {
+        if (s_chan[i].notify_h != 0 && s_chan[i].notify_h == h) return i;
+    }
+    return -1;
+}
+
+bool ble_chan_subscribed(int c)
+{
+    return (c >= 0 && c < BLE_CHAN_MAX) ? s_chan[c].subscribed : false;
+}
+
+bool ble_channels_ready(void)
+{
+    if (s_profile == NULL) return false;
+    for (int i = 0; i < s_profile->n_chan; i++) {
+        if (!s_chan[i].subscribed) return false;
+    }
+    return true;
+}
+
+esp_err_t ble_chan_write(int c, const uint8_t *data, size_t len)
+{
+    if (c < 0 || c >= BLE_CHAN_MAX || s_chan[c].write_h == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* The write type follows THIS characteristic's own properties. A single
+     * global properties byte was fine when there was one write characteristic;
+     * with three, they are not obliged to agree, and writing with response to
+     * one that only advertises WRITE_NR is silently dropped. */
+    bool with_rsp = (s_chan[c].write_props & ESP_GATT_CHAR_PROP_BIT_WRITE) != 0;
+    return ble_write_raw(s_chan[c].write_h, data, len, with_rsp);
+}
+
+void ble_set_notify_handle_callback(ble_notify_h_callback_t cb)
+{
+    s_notify_h_cb = cb;
+}
+
 void ble_set_notify_callback(ble_notify_callback_t cb) {
     s_notify_cb = cb;
 }
@@ -986,6 +1140,27 @@ void ble_set_state_callback(connect_logic_state_callback_t cb) {
  * without pinning us to any single model. The original 0xFA test is kept as a
  * fallback so any camera that does not embed its MAC still works.
  * -------------------------------------------------------------------------- */
+/* ===================== SLATE ADDITION ===================================
+ * Which vendor made this advertisement.
+ *
+ * The DJI arm is bsp_link_is_dji_camera_adv() below, called unchanged -- the
+ * camera that flies today is identified by exactly the code that has always
+ * identified it. The GoPro arm is a separate matcher in components/camvendor/,
+ * so no GoPro constant lands in this vendored file.
+ * ========================================================================= */
+cam_vendor_t camlink_cam_adv_vendor(esp_ble_gap_cb_param_t *scan_result)
+{
+    if (scan_result == NULL) return CAM_VENDOR_NONE;
+    if (bsp_link_is_dji_camera_adv(scan_result)) return CAM_VENDOR_DJI;
+
+    const uint8_t *adv = scan_result->scan_rst.ble_adv;
+    uint8_t len = (uint8_t)(scan_result->scan_rst.adv_data_len +
+                            scan_result->scan_rst.scan_rsp_len);
+    if (cam_adv_is_gopro(adv, len)) return CAM_VENDOR_GOPRO;
+
+    return CAM_VENDOR_NONE;
+}
+
 uint8_t bsp_link_is_dji_camera_adv(esp_ble_gap_cb_param_t *scan_result) {
     const uint8_t *ble_adv = scan_result->scan_rst.ble_adv;
     const uint8_t adv_len = scan_result->scan_rst.adv_data_len + scan_result->scan_rst.scan_rsp_len;
@@ -1161,6 +1336,29 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         if (a->success) {
             ESP_LOGI(TAG, "BONDING OK (addr_type=%d, auth_mode=0x%x)",
                      a->addr_type, a->auth_mode);
+            /* SLATE: re-subscribe any channel that was refused before the
+             * link was secured.
+             *
+             * Encryption is requested the moment the link comes up, and
+             * discovery is a long conversation, so bonding normally finishes
+             * first and this loop finds nothing to do. But on a FIRST pairing
+             * with a camera that will not accept an unencrypted write -- a
+             * GoPro is one; that is the whole answer in the ESP32 thread on
+             * GoPro's tracker -- the two can overlap, and a CCCD write that
+             * lands in the gap is refused with "insufficient authentication"
+             * and never retried by the stack. The channel would then sit
+             * unsubscribed until the session gave up. Registering again is
+             * idempotent (the stack dedupes by handle) and re-issues the
+             * CCCD write on the link as it now is. */
+            for (int ci = 0; ci < BLE_CHAN_MAX; ci++) {
+                if (s_chan[ci].notify_h != 0 && !s_chan[ci].subscribed &&
+                    s_ble_profile.connection_status.is_connected) {
+                    ESP_LOGW(TAG, "channel %d: re-subscribing now the link is secured", ci);
+                    esp_ble_gattc_register_for_notify(s_ble_profile.gattc_if,
+                                                      s_ble_profile.remote_bda,
+                                                      s_chan[ci].notify_h);
+                }
+            }
         } else {
             ESP_LOGE(TAG, "BONDING FAILED, reason=0x%x", a->fail_reason);
         }
@@ -1192,6 +1390,8 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         // 扫描结束后，根据重连模式和设备发现状态决定是否连接
         if (best_rssi > -128) {
             if (!ble_get_reconnecting() || (ble_get_reconnecting() && s_found_previous_device)) {
+                ble_latch_profile();   /* SLATE: before the connect, so
+                                        * discovery looks for the right thing */
                 try_to_connect(best_addr);
                 ESP_LOGI(TAG, "Connected to device: %02x:%02x:%02x:%02x:%02x:%02x",
                          best_addr[0], best_addr[1], best_addr[2], best_addr[3], best_addr[4], best_addr[5]);
@@ -1265,9 +1465,12 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                          r->scan_rst.bda[3], r->scan_rst.bda[4], r->scan_rst.bda[5]);
             }
 #endif
-            // Check if it is a DJI camera advertisement
-            // 检查是否为 DJI 相机广播
-            if (!bsp_link_is_dji_camera_adv(r)) {
+            /* SLATE PATCH: accept any camera vendor we know, not only DJI.
+             * The gate stays -- without it the only thing standing between an
+             * arbitrary BLE device and the bound-address ranking below is that
+             * the ranking happens to compare addresses. */
+            cam_vendor_t adv_vendor = camlink_cam_adv_vendor(r);
+            if (adv_vendor == CAM_VENDOR_NONE) {
                 break;
             }
             // Get the complete name from the advertisement data
@@ -1334,13 +1537,47 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                  * separates two adverts from the SAME camera, where a stronger
                  * one is simply a better sample of the same choice. */
                 int pri = bound_index_of(r->scan_rst.bda);
-                if (pri >= 0 &&
-                    (pri < best_pri ||
-                     (pri == best_pri && r->scan_rst.rssi > best_rssi))) {
+
+                /* Is this one asleep?
+                 *
+                 * A GoPro in standby still advertises, and connecting to it
+                 * wakes and boots it -- which is useful when it is the only
+                 * camera you own, and unhelpful when it is priority 1 and an
+                 * awake camera is priority 2. So AWAKE OUTRANKS PRIORITY: an
+                 * awake camera always beats a sleeping one, and priority
+                 * decides among equals. A lone sleeping camera still wins,
+                 * because nothing else is competing, which is exactly the
+                 * fallback that makes a single-GoPro module work.
+                 *
+                 * "Cannot tell" counts as awake. Every DJI camera lands here,
+                 * and so does any advert without the manufacturer data -- and
+                 * treating an unknown as asleep would quietly demote a camera
+                 * that is sitting there switched on. */
+                bool known = false, asleep = false;
+                if (adv_vendor == CAM_VENDOR_GOPRO) {
+                    uint8_t alen = (uint8_t)(r->scan_rst.adv_data_len +
+                                             r->scan_rst.scan_rsp_len);
+                    bool awake = cam_adv_gopro_awake(r->scan_rst.ble_adv, alen, &known);
+                    asleep = known && !awake;
+                }
+
+                bool better;
+                if (pri < 0)                     better = false;
+                else if (asleep != best_asleep)  better = !asleep;   /* awake wins */
+                else if (pri != best_pri)        better = (pri < best_pri);
+                else                             better = (r->scan_rst.rssi > best_rssi);
+
+                if (pri >= 0 && (best_pri == INT_MAX || better)) {
+                    best_asleep = asleep;
                     best_pri  = pri;
                     best_rssi = r->scan_rst.rssi;
                     memcpy(best_addr, r->scan_rst.bda, sizeof(esp_bd_addr_t));
                     s_best_addr_type = r->scan_rst.ble_addr_type;
+                    /* SLATE: remembered here, in the same place as the address
+                     * type and for the same reason -- both are properties of
+                     * the advert that won, and both are needed before the
+                     * connect is issued rather than after it. */
+                    s_sel_vendor = adv_vendor;
                     strncpy(s_remote_device_name, adv_name_str, sizeof(s_remote_device_name) - 1);
                     s_remote_device_name[sizeof(s_remote_device_name) - 1] = '\0';
                 }
@@ -1489,8 +1726,12 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
 
         // Handle service search result event
         // 处理服务搜索结果事件
-        if ((param->search_res.srvc_id.uuid.len == ESP_UUID_LEN_16) &&
-            (param->search_res.srvc_id.uuid.uuid.uuid16 == REMOTE_TARGET_SERVICE_UUID)) {
+        /* SLATE PATCH: compare against the active profile rather than the DJI
+         * constant, and compare length-aware. For the DJI profile this is the
+         * identical test it replaces. */
+        bool svc_match = camlink_uuid_eq(&s_profile->service,
+                                         &param->search_res.srvc_id.uuid);
+        if (svc_match) {
             s_ble_profile.service_start_handle = param->search_res.start_handle;
             s_ble_profile.service_end_handle   = param->search_res.end_handle;
             ESP_LOGI(TAG, "Service found: start=%d, end=%d",
@@ -1543,42 +1784,100 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
         }
         ESP_LOGI(TAG, "Service search complete, next get char by UUID");
 
-        // Get notify characteristic handle
-        // 获取通知特征句柄
-        uint16_t count = 1;
-        esp_gattc_char_elem_t char_elem_result;
-        esp_ble_gattc_get_char_by_uuid(gattc_if,
-                                       s_ble_profile.conn_id,
-                                       s_ble_profile.service_start_handle,
-                                       s_ble_profile.service_end_handle,
-                                       s_filter_notify_char_uuid,
-                                       &char_elem_result,
-                                       &count);
-        if (count > 0) {
-            s_ble_profile.notify_char_handle = char_elem_result.char_handle;
+        /* SLATE ADDITION: the profile's service has to have been seen on THIS
+         * connection. The handle range below is reset when a link drops, so a
+         * zero here means the camera does not carry the service we came for --
+         * a HERO that does not speak Open GoPro, say. Running the lookups
+         * anyway would search an empty range, find nothing, and time out
+         * thirty seconds later with nothing said about why. */
+        if (s_ble_profile.service_start_handle == 0) {
+            ESP_LOGE(TAG, "the %s service is not on this camera -- "
+                          "nothing here can be talked to", s_profile->name);
+            break;
+        }
+
+        /* SLATE PATCH: discover EVERY channel the active profile declares,
+         * and subscribe each one here.
+         *
+         * Two things that look like one. Resolving a handle issues no GATT
+         * traffic at all -- esp_ble_gattc_get_char_by_uuid() is a lookup in the
+         * cached database -- so a channel that is only resolved is a channel
+         * that will never deliver a notification. The blanket sweep further
+         * down does subscribe things, but it deliberately skips what we have
+         * already registered, so relying on it would mean relying on the very
+         * set it excludes. Every channel is therefore registered explicitly,
+         * right here, and the return value is checked: the stack holds a fixed
+         * array of registrations and the one past the end fails silently, with
+         * no event and no CCCD written.
+         *
+         * For the DJI profile this loop finds exactly what the two lookups it
+         * replaced found, and channel 0 still fills the same scalar fields the
+         * rest of this vendored file reads. */
+        ble_chans_reset();
+        for (int ci = 0; ci < s_profile->n_chan && ci < BLE_CHAN_MAX; ci++) {
+            uint16_t cnt = 1;
+            esp_gattc_char_elem_t el;
+
+            cnt = 1;
+            if (esp_ble_gattc_get_char_by_uuid(gattc_if, s_ble_profile.conn_id,
+                                               s_ble_profile.service_start_handle,
+                                               s_ble_profile.service_end_handle,
+                                               s_profile->chan[ci].notify, &el,
+                                               &cnt) == ESP_GATT_OK && cnt > 0) {
+                s_chan[ci].notify_h = el.char_handle;
+            }
+
+            cnt = 1;
+            if (esp_ble_gattc_get_char_by_uuid(gattc_if, s_ble_profile.conn_id,
+                                               s_ble_profile.service_start_handle,
+                                               s_ble_profile.service_end_handle,
+                                               s_profile->chan[ci].write, &el,
+                                               &cnt) == ESP_GATT_OK && cnt > 0) {
+                s_chan[ci].write_h     = el.char_handle;
+                s_chan[ci].write_props = el.properties;
+            }
+
+            ESP_LOGI(TAG, "channel %d: notify=0x%x write=0x%x props=0x%02x",
+                     ci, s_chan[ci].notify_h, s_chan[ci].write_h,
+                     s_chan[ci].write_props);
+
+            if (s_chan[ci].notify_h != 0) {
+                esp_err_t re = esp_ble_gattc_register_for_notify(
+                    gattc_if, s_ble_profile.remote_bda, s_chan[ci].notify_h);
+                if (re != ESP_OK) {
+                    /* Almost always the registration array being full. Said
+                     * loudly, because the alternative is a channel that stays
+                     * quiet for the whole session with nothing explaining it. */
+                    ESP_LOGE(TAG, "channel %d: register_notify failed: %s "
+                                  "(raise CONFIG_BT_GATTC_NOTIF_REG_MAX)",
+                             ci, esp_err_to_name(re));
+                }
+            }
+        }
+
+        /* Channel 0 is what the rest of this file has always called "the"
+         * notify and write characteristic. Keeping the scalars in step means
+         * connect_logic's readiness gate, data.c's writes and the diagnostic
+         * paths all carry on working untouched. */
+        if (s_chan[0].notify_h != 0) {
+            s_ble_profile.notify_char_handle = s_chan[0].notify_h;
             s_ble_profile.handle_discovery.notify_char_handle_found = true;
             ESP_LOGI(TAG, "Notify Char found, handle=0x%x",
                      s_ble_profile.notify_char_handle);
         }
 
-        // Get write characteristic handle
-        // 获取写特征句柄
-        count = 1;
-        esp_gattc_char_elem_t write_char_elem_result;
-        esp_ble_gattc_get_char_by_uuid(gattc_if,
-                                       s_ble_profile.conn_id,
-                                       s_ble_profile.service_start_handle,
-                                       s_ble_profile.service_end_handle,
-                                       s_filter_write_char_uuid,
-                                       &write_char_elem_result,
-                                       &count);
-        if (count > 0) {
-            s_ble_profile.write_char_handle = write_char_elem_result.char_handle;
-            s_ble_profile.write_char_props  = write_char_elem_result.properties;
+        /* Channel 0's write characteristic, published into the scalar fields
+         * the vendored code reads. The candidate-override below is DJI's and
+         * stays DJI's: it exists because the Osmo Nano reports 0xFFF5 as
+         * WRITE_NR only, which is a fact about DJI cameras and not about
+         * cameras in general. */
+        if (s_chan[0].write_h != 0) {
+            s_ble_profile.write_char_handle = s_chan[0].write_h;
+            s_ble_profile.write_char_props  = s_chan[0].write_props;
 
-            /* CAMLINK: override with this attempt's candidate, if it is not
-             * the default 0xFFF5 that upstream assumes. */
-            {
+            if (s_profile == &s_dji_profile) {
+                /* CAMLINK: override with this attempt's candidate, if it is not
+                 * the default 0xFFF5 that upstream assumes. */
                 uint16_t want = s_write_candidates[s_write_candidate_idx %
                     (sizeof(s_write_candidates)/sizeof(s_write_candidates[0]))];
                 s_write_candidate_idx++;
@@ -1593,6 +1892,8 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
                     if (c1 > 0) {
                         s_ble_profile.write_char_handle = alt.char_handle;
                         s_ble_profile.write_char_props  = alt.properties;
+                        s_chan[0].write_h     = alt.char_handle;
+                        s_chan[0].write_props = alt.properties;
                     }
                 }
                 ESP_LOGD(TAG, "writing commands to 0x%04X (handle=0x%02x props=0x%02x)",
@@ -1600,8 +1901,8 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
             }
             s_ble_profile.handle_discovery.write_char_handle_found = true;
             ESP_LOGI(TAG, "Write Char props=0x%02x (%s)",
-                     write_char_elem_result.properties,
-                     (write_char_elem_result.properties & ESP_GATT_CHAR_PROP_BIT_WRITE)
+                     s_ble_profile.write_char_props,
+                     (s_ble_profile.write_char_props & ESP_GATT_CHAR_PROP_BIT_WRITE)
                          ? "supports write-with-response"
                          : "WRITE_NR only -- will use write-without-response");
             ESP_LOGI(TAG, "Write Char found, handle=0x%x",
@@ -1626,8 +1927,14 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
                     s_ble_profile.service_end_handle, ch, &cnt, off);
                 if (st != ESP_GATT_OK || cnt == 0) break;
                 for (uint16_t k = 0; k < cnt; k++) {
+                    /* SLATE PATCH: skip EVERY channel the profile already
+                     * registered, not only channel 0. With one channel those
+                     * were the same test; with a GoPro's three they are not,
+                     * and the difference is a second registration of channels
+                     * 1 and 2 that writes their CCCDs twice for no reason. */
                     if ((ch[k].properties & ESP_GATT_CHAR_PROP_BIT_NOTIFY) &&
-                        ch[k].char_handle != s_ble_profile.notify_char_handle) {
+                        ch[k].char_handle != s_ble_profile.notify_char_handle &&
+                        ble_chan_of_notify_handle(ch[k].char_handle) < 0) {
                         esp_err_t e = esp_ble_gattc_register_for_notify(
                             gattc_if, s_ble_profile.remote_bda, ch[k].char_handle);
                         ESP_LOGI(TAG, "also subscribing to char handle 0x%02x: %s",
@@ -1716,6 +2023,15 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
          * a single notification, which looks exactly like a camera ignoring
          * our commands. Log what actually happened. */
         if (count > 0 && descr_elem.handle) {
+            /* SLATE: remember which channel this descriptor belongs to, while
+             * both handles are still in scope. The write acknowledgement below
+             * carries the DESCRIPTOR handle, so without this the ack arrives
+             * naming something no channel recognises and no channel is ever
+             * marked usable. */
+            {
+                int ci = ble_chan_of_notify_handle(param->reg_for_notify.handle);
+                if (ci >= 0) s_chan[ci].cccd_h = descr_elem.handle;
+            }
             uint16_t notify_en = 1;
             esp_err_t we = esp_ble_gattc_write_char_descr(gattc_if,
                                            s_ble_profile.conn_id,
@@ -1735,9 +2051,24 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
     }
     case ESP_GATTC_WRITE_DESCR_EVT: {
         if (param->write.status != ESP_GATT_OK) {
-            ESP_LOGE(TAG, "CCCD write FAILED, status=0x%x handle=0x%x",
-                     param->write.status, param->write.handle);
+            /* SLATE: name the two refusals that mean "not yet secured", since
+             * they are the ones the bonding-complete path recovers from. */
+            ESP_LOGE(TAG, "CCCD write FAILED, status=0x%x handle=0x%x%s",
+                     param->write.status, param->write.handle,
+                     (param->write.status == ESP_GATT_INSUF_AUTHENTICATION ||
+                      param->write.status == ESP_GATT_INSUF_ENCRYPTION)
+                         ? " (link not yet encrypted -- will retry after bonding)"
+                         : "");
         } else {
+            /* SLATE: the channel is only usable once the camera has
+             * acknowledged its CCCD. A GoPro answers a command written before
+             * this by not answering at all. */
+            for (int ci = 0; ci < BLE_CHAN_MAX; ci++) {
+                if (s_chan[ci].cccd_h != 0 && s_chan[ci].cccd_h == param->write.handle) {
+                    s_chan[ci].subscribed = true;
+                    break;
+                }
+            }
             ESP_LOGI(TAG, "CCCD write OK, notifications enabled (handle=0x%x)",
                      param->write.handle);
         }
@@ -1754,17 +2085,38 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
         // Handle notification data event
         // 处理通知数据事件
 
-        if (s_notify_cb) {
+        /* SLATE PATCH: hand the source handle to whoever wants it.
+         *
+         * With one notify characteristic the handle was redundant. With three
+         * -- a command reply, a settings reply and a status push, all arriving
+         * here -- it is the only thing that tells them apart. The handle-less
+         * callback is kept for the DJI path, which has always managed without
+         * it, so that path is bit-for-bit unchanged. */
+        if (s_notify_h_cb) {
+            s_notify_h_cb(param->notify.handle, param->notify.value,
+                          param->notify.value_len);
+        } else if (s_notify_cb) {
             s_notify_cb(param->notify.value, param->notify.value_len);
         }
         break;
     }
     case ESP_GATTC_DISCONNECT_EVT: {
+        /* SLATE: handles and subscriptions belong to the connection that just
+         * ended. Left behind they would read as ready on the next one. The
+         * vendor goes too, so a swap from a GoPro back to a DJI camera does
+         * not inherit the old answer. */
+        ble_chans_reset();
+        s_sel_vendor = CAM_VENDOR_NONE;
         // Handle disconnection event
         // 处理断开连接事件
         s_ble_profile.connection_status.is_connected = false;
         s_ble_profile.handle_discovery.write_char_handle_found = false;
         s_ble_profile.handle_discovery.notify_char_handle_found = false;
+        /* SLATE: the handle range belonged to the database that just went
+         * away. Left behind, the next connection would search it and quietly
+         * find nothing. */
+        s_ble_profile.service_start_handle = 0;
+        s_ble_profile.service_end_handle   = 0;
         s_connecting = false;
         /* WARN with a name, not INFO with a number. A dropped camera link is
          * the single most reported fault, and "reason=0x8" versus

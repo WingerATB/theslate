@@ -294,7 +294,7 @@ static esp_err_t state_get(httpd_req_t *req)
                     i ? "," : "",
                     c.addr[0], c.addr[1], c.addr[2], c.addr[3], c.addr[4], c.addr[5],
                     c.addr[0], c.addr[1], c.addr[2], c.addr[3], c.addr[4], c.addr[5],
-                    c.label, cam_scan_model_name(c.model));
+                    c.label, cam_scan_model_name(cam_vendor_of_proto(c.proto), c.model));
     }
     n = jappend(body, sizeof(body), n, "],");
 
@@ -524,7 +524,7 @@ static esp_err_t scan_get(httpd_req_t *req)
             i ? "," : "",
             c->bda[0], c->bda[1], c->bda[2], c->bda[3], c->bda[4], c->bda[5],
             c->bda[0], c->bda[1], c->bda[2], c->bda[3], c->bda[4], c->bda[5],
-            c->name, cam_scan_model_name(c->model), c->rssi,
+            c->name, cam_scan_model_name(c->vendor, c->model), c->rssi,
             /* Any camera the module holds, not only the top-priority one --
              * the list shows all of them and a card must not offer to bind
              * something that is already up there. */
@@ -585,10 +585,12 @@ static esp_err_t bind_post(httpd_req_t *req)
     int n = cam_scan_get(cams, CAM_SCAN_MAX);
     bool visible = false;
     uint8_t model = 0;
+    uint8_t vendor = CAM_VENDOR_NONE;
     const char *name = NULL;
     for (int i = 0; i < n; i++) {
         if (memcmp(cams[i].bda, mac, 6) == 0) {
             visible = true;
+            vendor = cams[i].vendor;
             /* The model code decides which protocol the module will speak to
              * this camera, so it is stored with the binding rather than being
              * rediscovered at connect time -- by then we are already choosing. */
@@ -602,7 +604,19 @@ static esp_err_t bind_post(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    if (!duml_cam_bind_add(mac, model, name)) {
+    /* A GoPro older than a HERO 9 advertises the same service and cannot speak
+     * this protocol at all. Refused here, with the reason, rather than allowed
+     * into the list to sit there never connecting -- better a camera that will
+     * not bind than one that binds and can never work. */
+    if (vendor == CAM_VENDOR_GOPRO) {
+        const char *why = NULL;
+        if (!cam_gopro_model_supported(model, &why)) {
+            httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, why);
+            return ESP_FAIL;
+        }
+    }
+
+    if (!duml_cam_bind_add((cam_vendor_t)vendor, mac, model, name)) {
         /* Full. Said plainly rather than by silently evicting the camera at
          * the bottom -- which would be somebody's other aircraft, dropped
          * without them being told. */

@@ -9,7 +9,7 @@
 
 **Arm the quad. The camera rolls.**
 
-[![Release](https://img.shields.io/badge/release-1.1.0-0F8A4A?style=flat-square)](../../releases)
+[![Release](https://img.shields.io/badge/release-1.2.0-0F8A4A?style=flat-square)](../../releases)
 [![License](https://img.shields.io/badge/license-PolyForm%20Strict-14171C?style=flat-square)](LICENSE)
 [![Hardware](https://img.shields.io/badge/hardware-ESP32--C3-5B636E?style=flat-square)](#what-you-need)
 [![Buy me a coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-FFDD00?style=flat-square&logo=buymeacoffee&logoColor=14171C)](https://www.buymeacoffee.com/wingeratb)
@@ -18,7 +18,7 @@
 
 </div>
 
-Your DJI Osmo starts recording the moment you arm, and stops when you disarm.
+Your DJI Osmo — or, new in 1.2, your GoPro — starts recording the moment you arm, and stops when you disarm.
 The camera's own state — recording, clip time, battery, card remaining — is
 drawn onto your Betaflight OSD, so you know it is rolling before you leave the
 ground. And if it is *not* rolling, the OSD says so in as many words rather than
@@ -39,7 +39,7 @@ web page that works out which chip you have.
 | | |
 |---|---|
 | **Module** | An ESP32-C3 Supermini. This is the only board officially supported. |
-| **Camera** | DJI **Osmo Nano**, **Osmo 360**, or an **Osmo Action** camera. |
+| **Camera** | DJI **Osmo Nano**, **Osmo 360** or **Osmo Action** — or a **GoPro**: HERO9 through HERO13 Black, HERO11 Black Mini, MAX 2, MISSION 1 and MISSION 1 Pro. |
 | **Flight controller** | Betaflight **2025.12 or newer**, with one spare UART. This is a hard requirement — older firmware cannot draw the OSD text. |
 | **A phone** | For setup. Any browser. |
 
@@ -90,12 +90,11 @@ the chip it was built for in its header, and both the module's bootloader and
 its own updater refuse a mismatch rather than half-flashing something that will
 not boot.
 
-**Only the C3 has flown.** The other images build, link and fit, and nobody has
-bound a camera with one. Two of them are also louder: the C6 and C61 radios stop
-at −15 dBm and the original ESP32 at −12 dBm, where the C3 reaches −24 dBm — so
-the quietest setting on those parts still transmits more next to your receiver
-than anything that has been flown here. Treat them as a starting point for a
-port rather than as a supported board.
+**The C3 Supermini is the reference board; the other five are in beta.** Two of
+them are also louder: the C6 and C61 radios stop at −15 dBm and the original
+ESP32 at −12 dBm, where the C3 reaches −24 dBm — so the quietest setting on
+those parts still transmits more next to your receiver than the C3 does. If you
+fly one, tell us how it went.
 
 ### From your browser
 
@@ -224,6 +223,26 @@ from this module — nothing on the camera itself changes — but to add it back
 has to be switched on and in range again.
 
 Updating from a firmware that only held one camera keeps it, as the first entry.
+
+#### GoPro
+
+A GoPro will not appear in Nearby until it has been put into **pairing mode**
+once: on the camera, **Preferences › Connections › Connect Device › GoPro Quik
+App**. Do that, then pick it from the list. There is no code to confirm — it
+simply pairs — and after that first time the camera remembers the module and
+you never open that menu again.
+
+Supported: **HERO9 Black through HERO13 Black, HERO11 Black Mini, MAX 2,
+MISSION 1** and **MISSION 1 Pro**. Other models are refused when you try to add
+them.
+
+On the OSD a GoPro is labelled by generation — `GP12`, `GP13` — the way an Osmo
+is `NANO` or `O360`; a MISSION 1 is `MSN`.
+
+The MISSION 1 series speaks a newer variant of GoPro's status protocol than the
+HERO line. The module knows both, picks by model, and lets the camera's own
+answer overrule it — so a GoPro newer than any it has heard of still gets
+asked in both dialects before anyone gives up.
 
 ### Recording
 
@@ -465,6 +484,12 @@ your camera uses when you pick it — you never have to know.
 Attribution and the terms that came with DJI's code are in
 [NOTICE](NOTICE). That component stays under its original MIT licence.
 
+GoPro is the other way round: GoPro publish their Bluetooth interface as
+[Open GoPro](https://gopro.github.io/OpenGoPro/), and the GoPro side of this
+project is written to that document and checked against GoPro's own SDK. It
+shares the radio with the DJI code and nothing else — a GoPro never touches a
+line of the DJI protocol, and a DJI camera never touches a line of GoPro's.
+
 ---
 
 ## Licence
@@ -491,30 +516,26 @@ demo and stays under its original MIT licence. See [NOTICE](NOTICE).
 
 ## Status
 
-**1.1.0.** Read this in two halves, because they are not the same
-standard of evidence.
+**1.2.0.** Everything from 1.0 is **stable**: on an Osmo Nano and an Osmo 360 —
+pairing, live camera status, every record mode, the OSD, the AUX trigger as both
+a switch and a momentary button, and firmware updates with rollback.
 
-**Flown, and working as intended** — everything that was in 1.0.0-beta1.
-Verified in the air on an Osmo Nano and an Osmo 360: pairing, live camera
-status, every record mode, the OSD, the AUX trigger as both a switch and a
-momentary button, and firmware updates with rollback proven on hardware.
-
-**New since 1.0, and not yet flown.** All of it builds, and the logic is covered by
-host tests that compile the shipped source rather than a copy of it. None of it
-has been in the air:
+**New since 1.0 is in beta.** All of it builds, and the logic is covered by host
+tests that compile the shipped source rather than a copy of it:
 
 | | State |
 |---|---|
-| Warnings on the OSD and the LED | tested at a desk, not flown |
-| Keep recording after landing | tested at a desk, not flown |
-| More than one camera, in priority order | the list is host-tested; **the priority pick itself needs two cameras on a bench** |
-| Five more chips (S3, C6, C61, C5, ESP32) | they build and the images fit. **Nobody has bound a camera with one.** Only the C3 has flown |
-| Setup opening itself on a USB cable | tested on a C3 Supermini, not flown |
-| The browser flasher | **tested** — installs the right image for the detected chip, over a real cable |
+| Warnings on the OSD and the LED | beta |
+| Keep recording after landing | beta |
+| More than one camera, in priority order | beta |
+| Five more chips (S3, C6, C61, C5, ESP32) | beta — the C3 Supermini is the reference board |
+| Setup opening itself on a USB cable | beta |
+| The browser flasher | stable — installs the right image for the detected chip |
+| GoPro (HERO9 and newer) | **beta.** Written to GoPro's published spec and checked byte for byte against GoPro's own SDK — the UUIDs, the packet framing, the status ids, the keep-alive, both status-id dialects |
+| Osmo Action | beta — it speaks the same protocol as the Osmo 360 |
 
-Two gaps are hardware rather than behaviour: there is no Osmo Action camera here
-to test against, and no board other than the C3 Supermini. The Action speaks the
-same protocol as the Osmo 360, which has flown.
+Beta means it is built to be right and we want to hear how it behaves on your
+aircraft, good or bad — the serial log tells the whole story, so attach it.
 
 Found a problem? [Open an issue](../../issues).
 

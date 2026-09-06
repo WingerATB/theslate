@@ -42,6 +42,9 @@ typedef struct {
     uint8_t  temp_over;          /* 0 ok, 1 warn, 2 too hot, 3 shutting down  */
     bool     temp_over_valid;
 
+    bool     card_fault;         /* no card, unformatted, full or errored     */
+    bool     card_fault_valid;
+
     char     label[6];           /* NANO / O360 / A5 ... resolved at bind
                                   * time; never blank, so the field renders
                                   * even for a camera we do not recognise    */

@@ -64,6 +64,11 @@ typedef struct {
 
     bool     card_valid;
     uint32_t card_s;          /* recording seconds left on the card           */
+    /* The card cannot be recorded to at all. A separate signal from card_s,
+     * because a camera reporting "no card" has no time remaining to report --
+     * so a warning that depended on card_s being present would go quiet in
+     * exactly the case it exists for. */
+    bool     card_fault;
 
     bool     batt_valid;
     uint8_t  batt_pct;
@@ -90,7 +95,12 @@ static inline camlink_warn_t camlink_warn_pick(const camlink_warn_in_t *in)
     if (in->cam_gone) return CAM_WARN_NONE;
 
     /* Cannot record at all. First because it is the only one the pilot can
-     * still do something about while standing next to the aircraft. */
+     * still do something about while standing next to the aircraft.
+     *
+     * Two ways to reach it: the camera says the card is faulty or absent, or
+     * it says there is no time left on it. The first does not imply the
+     * second -- a camera with no card has nothing to say about time. */
+    if (in->card_fault) return CAM_WARN_NO_SD;
     if (in->card_valid && in->card_s == 0) return CAM_WARN_NO_SD;
 
     /* 2 = too hot to record, 3 = about to shut down. 1 is the camera's own

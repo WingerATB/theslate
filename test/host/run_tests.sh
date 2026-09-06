@@ -18,7 +18,9 @@ cc $CFLAGS -I../../components/camlink/include -o test_press test_press.c
 cc $CFLAGS -I../../components/camlink/include -o test_override test_override.c
 cc $CFLAGS -I../../components/camlink/include -o test_setup_guard test_setup_guard.c
 cc $CFLAGS -I../../components/camlink/include -o test_warn test_warn.c
-cc $CFLAGS -I../../components/duml/include -o test_bind test_bind.c
+cc $CFLAGS -I../../components/duml/include -I../../components/camvendor/include -o test_bind test_bind.c
+cc $CFLAGS -I../../components/gopro/include -o test_gopro test_gopro.c
+cc $CFLAGS -I../../components/camvendor/include -o test_camvendor test_camvendor.c
 echo
 ./test_msp_frames
 echo
@@ -41,3 +43,7 @@ echo
 ./test_warn
 echo
 ./test_bind
+echo
+./test_gopro
+echo
+./test_camvendor

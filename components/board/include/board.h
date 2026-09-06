@@ -89,7 +89,7 @@ void board_report(void);
  * the property the ELRS receiver beside it cares about. What that is worth in
  * dBm is not the same everywhere:
  *
- *     C3 / S3 / C5      -24 dBm     the reference, and what has flown
+ *     C3 / S3 / C5      -24 dBm     the reference
  *     C6 / C61          -15 dBm     9 dB louder; its radio goes no quieter
  *     ESP32             -12 dBm    12 dB louder, and only three rungs
  *

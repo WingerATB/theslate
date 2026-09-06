@@ -44,7 +44,7 @@ static const tx_rung_t k_tx[] = {
 
 #else
 /* C3, S3 (which shares the C3's controller outright), C5, C2. The reference
- * ladder, and the one that has flown. */
+ * ladder, and the reference. */
 static const tx_rung_t k_tx[] = {
     { ESP_PWR_LVL_N24, "-24 dBm" },
     { ESP_PWR_LVL_N12, "-12 dBm" },
