@@ -111,17 +111,25 @@ config CAMLINK_SWITCH_THRESHOLD
 
 config CAMLINK_MSP_TX_GPIO
     int "UART1 TX GPIO (to FC RX)"
+    range 0 48
     default 4
     help
       Avoid GPIO2 and GPIO3. GPIO8 and GPIO9 carry the onboard LED and button
       and must stay free. Leave GPIO20/21 for the console.
 
+      The range is the widest any supported part has (the S3); a pin that is
+      legal here can still be absent on a narrower one, and uart_set_pin then
+      refuses it at boot and the module comes up with no flight controller
+      link. It says so in the log rather than failing silently.
+
 config CAMLINK_MSP_RX_GPIO
     int "UART1 RX GPIO (from FC TX)"
+    range 0 48
     default 5
 
 config CAMLINK_MSP_BAUD
     int "MSP baud rate"
+    range 9600 921600
     default 115200
 
 endmenu

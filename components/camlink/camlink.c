@@ -50,6 +50,17 @@ static const char *TAG = "SLATE";
  * which is nothing next to the camera's own shutter delay. */
 #define RECORD_RETRY_MS      3000
 
+/* How long a cut waits for the camera to finish closing the old clip before
+ * starting the new one anyway.
+ *
+ * The camera saying "not recording" is the signal this waits for; the deadline
+ * is for the camera that goes quiet instead of answering. An Osmo Nano stops
+ * servicing BLE for over two seconds while it finalises, so it is the one that
+ * needs the fallback, and 2.5 s clears its measured stall. Longer would be a
+ * gap in the footage; shorter would fire into the file close, which is the
+ * mistake this replaced. */
+#define CUT_RESTART_MAX_MS   2500
+
 /* How often every OSD slot is rewritten whether or not it changed. See the note
  * at the write itself: the FC can forget, and nothing tells us when it has. */
 #define OSD_REFRESH_MS       1000
@@ -292,6 +303,7 @@ void camlink_logic_task(void *arg)
     uint8_t  tx_now     = 0;             /* level currently applied           */
     bool     tx_applied = false;
     bool     want        = false;
+    bool     prev_want   = false;        /* last tick's effective intent      */
     camlink_stopdelay_t sd = {0};        /* post-roll                        */
     uint32_t unmet_since = 0;            /* when the want first went unmet   */
     bool     unmet_seen  = false;
@@ -394,10 +406,30 @@ void camlink_logic_task(void *arg)
          * authority test above is what handles a dropout instead. */
         if (m.link_up && m.boxarm_known) armed_ref = m.armed;
 
-        bool auto_want = ever_had_fc
-                       ? camlink_auto_want(cfg.mode, cfg.switch_kind,
-                                           armed_ref, sw, rc_latch)
-                       : false;
+        /* What the automatic source is asking for, read from the HELD arm
+         * state -- the raw intent, before the question of whether that source
+         * can still be heard from. */
+        bool auto_want_raw = ever_had_fc
+                           ? camlink_auto_want(cfg.mode, cfg.switch_kind,
+                                               armed_ref, sw, rc_latch)
+                           : false;
+
+        /* ...and a source that cannot be heard from is not asking for anything.
+         *
+         * Holding armed_ref through a dropout is right -- it is what stops a
+         * brief UART gap from fabricating two arm edges. But it also meant the
+         * automatic intent stayed RECORD on a flight controller that had gone
+         * silent, so a cut UART left the clip running: authority only ever
+         * demoted an ACTIVE override, and with no override the arbiter falls
+         * straight back to auto_want. Five places say a dead UART closes an
+         * open clip, including the README and the timeout constant's own
+         * justification; this is the line that makes that true.
+         *
+         * Gating the INTENT while leaving the MOVEMENT (below) computed from
+         * the raw value is the whole trick: the clip stops, no edge is
+         * fabricated, no override is released, and a link that comes back
+         * still armed resumes recording. */
+        bool auto_want = auto_want_raw && authority;
 
         /* In SWITCH+BUTTON the RC press drives the mode's own latch. In BOTH it
          * is a manual press like the front-panel button. Everywhere else it is
@@ -415,7 +447,10 @@ void camlink_logic_task(void *arg)
         camlink_ovr_in_t oin = {
             .press         = manual_press,
             .auto_want     = auto_want,
-            .auto_moved    = auto_seen && (auto_want != auto_prev),
+            /* Movement is measured on the RAW intent, so a UART dropout -- which
+             * gates auto_want without the switch or the arm state having moved
+             * -- is not mistaken for the pilot moving something. */
+            .auto_moved    = auto_seen && (auto_want_raw != auto_prev),
             .authority     = authority,
             .cam_connected = cam.connected,
             .cam_valid     = cam.recording_valid,
@@ -424,10 +459,18 @@ void camlink_logic_task(void *arg)
         };
         /* An automatic STOP specifically, not merely a move -- captured here
          * because auto_prev is about to be overwritten and the answer needs
-         * both values. */
-        bool auto_stop = oin.auto_moved && !auto_want;
+         * both values.
+         *
+         * AND the module has to have been recording for a stop to be worth
+         * padding. Without that second half, a pilot who stops the clip with
+         * the button while still armed and then disarms gets a post-roll hold
+         * latched onto an idle camera: the disarm releases the override, raises
+         * the stop edge, and the hold starts a clip nobody asked for and then
+         * records it on the ground. Post-roll extends a recording; it must not
+         * be able to begin one. */
+        bool auto_stop = oin.auto_moved && !oin.auto_want && prev_want;
 
-        auto_prev = auto_want;
+        auto_prev = auto_want_raw;
         auto_seen = true;
 
         want = camlink_ovr_update(&ovr, &oin);
@@ -451,6 +494,10 @@ void camlink_logic_task(void *arg)
             .now_ms        = tnow,
         };
         want = camlink_stopdelay_update(&sd, &sin, &sd_remain);
+
+        /* The effective intent this tick, for the next tick to consult. `want`
+         * is final here -- everything below only reads it. */
+        prev_want = want;
         if (sd_remain) {
             ESP_LOGD(TAG, "stop delayed, %u s left", (unsigned)sd_remain);
         }
@@ -510,6 +557,9 @@ void camlink_logic_task(void *arg)
         static uint32_t last_req = 0;
         static bool have_sent = false;
         static bool last_sent_want = false;
+        /* Second half of a cut: the STOP is out and the fresh clip is owed. */
+        static bool     cut_restart    = false;
+        static uint32_t cut_restart_by = 0;
         uint32_t t = now_ms();
 
         bool need = cam.recording_valid ? (cam.recording != want)
@@ -524,20 +574,67 @@ void camlink_logic_task(void *arg)
             /* Nothing can be delivered, and a cut queued now would fire as a
              * surprise on reconnect. Drop it and re-arm on the next edge. */
             s_cut_pending = false;
+            cut_restart   = false;
             have_sent = false;
+        } else if (cut_restart) {
+            /* Second half of a cut: the STOP has gone, and the fresh clip waits
+             * for the camera to finish closing the old one.
+             *
+             * It used to be one blind pair -- STOP, sleep 200 ms, START -- and
+             * 200 ms lands squarely inside the finalise window this file
+             * measured for the retry gate above: ~1.65 s on an Osmo 360 before
+             * a stop is even reflected, and over two seconds on a Nano during
+             * which it does not service BLE at all. So the START was issued
+             * into a camera mid-file-close, was rejected with ret_code 223, and
+             * the retry gate then held the fresh clip off for a further 3 s
+             * because last_req had been stamped by the cut. "It never leaves
+             * you not recording" was exactly what failed.
+             *
+             * Waiting for the camera to say it has stopped is the honest
+             * signal. A Nano goes quiet rather than answering, so the deadline
+             * is what covers it -- and this branch is deliberately exempt from
+             * the retry gate, because the whole point is to be prompt. The 200
+             * ms vTaskDelay is gone with it, which also stops the cut from
+             * stalling the OSD for most of a tick. */
+            if (!want) {
+                /* The standing intent stopped being RECORD while the old clip
+                 * was still closing -- the pilot disarmed, or pressed stop.
+                 * Splitting the cut into two ticks opened this window; the old
+                 * blind pair could not be interrupted because it never gave the
+                 * loop back. Abandon the restart rather than starting a clip
+                 * nobody wants any more. The next pass reconciles normally. */
+                cut_restart = false;
+                ESP_LOGI(TAG, "cut abandoned: no longer recording");
+            } else {
+                bool cam_idle = cam.recording_valid && !cam.recording;
+                if (cam_idle || (int32_t)(t - cut_restart_by) >= 0) {
+                    cut_restart    = false;
+                    duml_cam_request_record(true);
+                    last_req       = t;
+                    have_sent      = true;
+                    last_sent_want = true;
+                    ESP_LOGI(TAG, "cut: fresh clip started (%s)",
+                             cam_idle ? "camera confirmed idle" : "deadline");
+                }
+            }
         } else if ((need || s_cut_pending) && (t - last_req) >= RECORD_RETRY_MS) {
             if (s_cut_pending) {
-                /* Cut a bad take: stop, then start a fresh clip. */
-                s_cut_pending = false;
+                /* Cut a bad take: stop now, start as soon as the camera is
+                 * ready -- see the branch above. */
+                s_cut_pending  = false;
                 duml_cam_request_record(false);
-                vTaskDelay(pdMS_TO_TICKS(200));
-                duml_cam_request_record(true);
+                cut_restart    = true;
+                cut_restart_by = t + CUT_RESTART_MAX_MS;
+                last_req       = t;
+                have_sent      = true;
+                /* A STOP was what went out, whatever the standing intent is. */
+                last_sent_want = false;
             } else {
                 duml_cam_request_record(want);
+                last_req       = t;
+                have_sent      = true;
+                last_sent_want = want;
             }
-            last_req       = t;
-            have_sent      = true;
-            last_sent_want = want;
         }
 
         

@@ -423,6 +423,19 @@ footer button{flex:1}
 
 <script>
 const $ = s => document.querySelector(s);
+
+// Anything the CAMERA supplied, on its way into markup.
+//
+// Names and model strings arrive here as raw bytes copied out of a Bluetooth
+// advertisement, and an advertisement is written by whoever is holding the
+// radio -- not necessarily by a camera, and not necessarily by a friend. Any
+// device in range can put a name on the air, so a name dropped into innerHTML
+// unescaped is arbitrary script running on the page that drives the firmware
+// updater, the camera list and the exit. Escape at the sink, every time, and do
+// not rely on the firmware having escaped it first: the firmware is not the
+// only thing that can put bytes on that wire.
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const AUX_MAX = 14;
 let pollTimer = null;
 // Redraws are suppressed until this moment, so a poll cannot replace a row
@@ -777,11 +790,11 @@ function renderKnown(list, max) {
   box.dataset.key = key;
 
   box.innerHTML = known.map((c, i) => `
-    <div class="cam known" data-id="${c.id}">
+    <div class="cam known" data-id="${esc(c.id)}">
       <div class="grip">⠿</div>
       <div class="info">
-        <div class="nm">${c.label || 'Camera'}</div>
-        <div class="sub">${c.model || 'DJI camera'} · ${c.mac}</div>
+        <div class="nm">${esc(c.label || 'Camera')}</div>
+        <div class="sub">${esc(c.model || 'DJI camera')} · ${esc(c.mac)}</div>
       </div>
       <div class="pri">${i + 1}</div>
     </div>`).join('');
@@ -932,9 +945,9 @@ function renderCams(cams) {
                 : (c.model || c.name || 'DJI camera');
     // data-id is the separator-free form the firmware parses; c.mac with its
     // colons is for the human reading the row.
-    return `<div class="cam ${cls}" data-id="${c.id}">
-      <div class="info"><div class="nm">${c.name || c.model || 'DJI camera'}</div>
-      <div class="sub">${label} · ${c.mac}</div></div>${bars(c.rssi)}</div>`;
+    return `<div class="cam ${cls}" data-id="${esc(c.id)}">
+      <div class="info"><div class="nm">${esc(c.name || c.model || 'DJI camera')}</div>
+      <div class="sub">${esc(label)} · ${esc(c.mac)}</div></div>${bars(c.rssi)}</div>`;
   }).join('');
 
   box.querySelectorAll('.cam').forEach(el => {

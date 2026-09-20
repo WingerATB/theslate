@@ -29,8 +29,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The same gate ci.yml puts in front of its builds, for the same reason -- and
+  # it matters MORE here. ci.yml only produces artifacts a developer looks at;
+  # this workflow publishes the images a stranger flashes onto their board from
+  # the front page. Until this job existed, those were the least-checked
+  # binaries the project shipped: ci.yml is branch-triggered and runs the tests,
+  # but nothing made a deploy wait for it, so a push that broke a host test
+  # still replaced the download.
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tests
+        run: ./test/host/run_tests.sh
+
   build:
     runs-on: ubuntu-latest
+    needs: host-tests
     strategy:
       fail-fast: false
       matrix:
@@ -88,7 +103,19 @@ jobs:
           retention-days: 1
 
   deploy:
-    needs: build
+    needs: [host-tests, build]
+    # Publish what DID build, which is what the manifest comment beside the
+    # target loop has always claimed happens: "a target whose build failed
+    # simply is not offered". It did not happen -- a bare `needs: build` skips
+    # this job when any matrix leg fails, so one broken beta target took the
+    # whole page down with it, including the C3 image that is the reference
+    # board and the one nearly everybody wants.
+    #
+    # The host tests are the one thing that is NOT allowed to be partial: they
+    # gate what a stranger downloads, so a failure there stops the deploy
+    # outright rather than merely being reported. An all-red matrix is caught
+    # by the empty-targets check in the assembly step below.
+    if: ${{ !cancelled() && needs.host-tests.result == 'success' }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -112,16 +139,41 @@ jobs:
           # matrix above therefore adds it to the tool, and a target whose build
           # failed simply is not offered -- which is the honest outcome, and one
           # nobody has to remember to keep in step.
+          # Say WHICH build this is, not merely which version it is near.
+          #
+          # This workflow runs on every push to main, so between a release and
+          # the next version bump it publishes firmware that is not the release
+          # -- and it used to label that with the released version number, so
+          # the page offered "Firmware 1.2.0" for an image that was not the one
+          # attached to v1.2.0. Two different binaries under one name, with
+          # nothing to tell them apart, on the path a first-time user takes.
+          #
+          # A tag build is the release and says so. Anything else carries the
+          # commit it was built from and admits what it is.
           VER="$(cat VERSION)"
+          if [ "${GITHUB_REF_TYPE:-branch}" = "tag" ]; then
+            LABEL="${VER}"
+          else
+            LABEL="${VER}+$(git rev-parse --short HEAD) (development build)"
+          fi
+
+          # Where the app slot and the OTA selector live. Read from
+          # partitions.csv rather than repeated here, because a layout change
+          # that did not reach this file would write firmware to the wrong
+          # address on somebody else's board.
+          APP=$(awk -F',' '/^ota_0/ {gsub(/ /,"",$4); print $4}' partitions.csv)
+          OTAD=$(awk -F',' '/^otadata/ {gsub(/ /,"",$4); print $4}' partitions.csv)
+
+          # An awk that matched nothing yields an empty string, and $(( )) turns
+          # that into 0 without complaining. A manifest saying an update goes to
+          # address 0 tells the flasher to write the app over the bootloader.
+          # Refuse to publish rather than emit that.
+          case "$APP"  in 0x*) ;; *) echo "::error::ota_0 offset not found in partitions.csv";  exit 1;; esac
+          case "$OTAD" in 0x*) ;; *) echo "::error::otadata offset not found in partitions.csv"; exit 1;; esac
+
           {
             echo '{'
-            echo "  \"version\": \"${VER}\","
-            # Where the app slot and the OTA selector live. Read from
-            # partitions.csv rather than repeated here, because a layout change
-            # that did not reach this file would write firmware to the wrong
-            # address on somebody else's board.
-            APP=$(awk -F',' '/^ota_0/ {gsub(/ /,"",$4); print $4}' partitions.csv)
-            OTAD=$(awk -F',' '/^otadata/ {gsub(/ /,"",$4); print $4}' partitions.csv)
+            echo "  \"version\": \"${LABEL}\","
             echo "  \"otadata_address\": $((OTAD)),"
             echo '  "targets": {'
             first=1
@@ -140,6 +192,14 @@ jobs:
             echo '  }'
             echo '}'
           } > site/manifest.json
+
+          # An all-red matrix produces an empty targets list, and publishing
+          # that would replace a working page with one that offers nothing.
+          # Keeping the old page up is the better failure.
+          if [ $first -eq 1 ]; then
+            echo "::error::no images were built -- refusing to publish an empty page"
+            exit 1
+          fi
 
           # Jekyll would otherwise try to process this and drop the .bin files.
           touch site/.nojekyll

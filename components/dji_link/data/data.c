@@ -312,7 +312,22 @@ static entry_t* allocate_entry_by_cmd(uint8_t cmd_set, uint8_t cmd_id) {
     if (existing_entry) {
         // Entry exists, reuse it
         // 条目已存在，复用
-        ESP_LOGI(TAG, "Entry for cmd_set=0x%04X cmd_id=0x%04X already exists, it will be overwritten", cmd_set, cmd_id);
+        ESP_LOGD(TAG, "Entry for cmd_set=0x%04X cmd_id=0x%04X already exists, it will be overwritten", cmd_set, cmd_id);
+
+        /* SLATE PATCH: release what is being overwritten.
+         *
+         * The caller assigns a freshly parsed block over entry->parse_result
+         * the moment this returns. Whatever is already here was parsed for an
+         * earlier push and, for an unsolicited command like the 1D02 status
+         * push, was never waited for and never consumed -- and every push
+         * refreshes last_access_time, so the idle cleanup never reclaims it
+         * either. At the camera's fixed 2 Hz that is a block leaked twice a
+         * second for the whole flight. */
+        if (existing_entry->parse_result != NULL) {
+            free(existing_entry->parse_result);
+            existing_entry->parse_result = NULL;
+            existing_entry->parse_result_length = 0;
+        }
         return existing_entry;
     }
 
@@ -1014,6 +1029,10 @@ static void process_notification_data(const uint8_t *raw_data, size_t raw_data_l
         // 解析数据段
         void *parse_result = NULL;
         size_t parse_result_length = 0;
+        /* SLATE ADDITION: whether an entry took ownership of parse_result.
+         * If none did -- no free entry, or the map mutex could not be taken --
+         * this function is the last reference to it and has to release it. */
+        bool parse_result_stored = false;
         if (frame.data && frame.data_length > 0) {
             // Assume protocol_parse_data returns void* type
             // 假设 protocol_parse_data 返回 void* 类型
@@ -1044,12 +1063,19 @@ static void process_notification_data(const uint8_t *raw_data, size_t raw_data_l
                 // Assume parse_result is void* object returned by protocol_parse_data
                 // 假设 parse_result 是 protocol_parse_data 返回的 void* 对象
                 if (parse_result != NULL) {
+                    /* SLATE PATCH: same overwrite rule as the cmd-keyed path
+                     * below -- a result already sitting here belongs to nobody
+                     * once it is replaced. */
+                    if (entry->parse_result != NULL) {
+                        free(entry->parse_result);
+                    }
                     // Put parsing result into corresponding entry
                     // 将解析结果放入对应的条目
                     entry->parse_result = parse_result;  // Store void* result in entry's value field
                                                          // 将 void* 结果存储到条目的 value 字段
                     entry->parse_result_length = parse_result_length; // Record result length
                                                                       // 记录结果长度
+                    parse_result_stored = true;
                     // Wake up waiting task
                     // 唤醒等待的任务
                     xSemaphoreGive(entry->sem);
@@ -1072,7 +1098,8 @@ static void process_notification_data(const uint8_t *raw_data, size_t raw_data_l
                     entry->parse_result_length = parse_result_length;
                     entry->seq = actual_seq;
                     entry->last_access_time = xTaskGetTickCount();
-                    ESP_LOGI(TAG, "New entry allocated for seq=0x%04X", actual_seq);
+                    parse_result_stored = true;
+                    ESP_LOGD(TAG, "New entry allocated for seq=0x%04X", actual_seq);
                     // Wake up any waiting tasks
                     // 唤醒任何等待的任务
                     xSemaphoreGive(entry->sem);
@@ -1113,6 +1140,16 @@ static void process_notification_data(const uint8_t *raw_data, size_t raw_data_l
                     ESP_LOGE(TAG, "Failed to allocate memory for new status update callback");
                 }
             }
+        }
+
+        /* SLATE ADDITION: nobody took it, so it is ours to release.
+         *
+         * Freed here rather than at the point it failed to be stored, because
+         * the two status dispatches above still read it. Both take their own
+         * copy, so this is the last reference either way. */
+        if (parse_result != NULL && !parse_result_stored) {
+            free(parse_result);
+            parse_result = NULL;
         }
     } else {
         // ESP_LOGW(TAG, "Received frame does not start with 0xAA, ignoring...");

@@ -181,7 +181,12 @@ const REFUSED = {
 
 let manifest = null;
 fetch('manifest.json', {cache: 'no-store'})
-  .then(r => r.json())
+  .then(r => {
+    // Without this a 404 or a 503 reaches .json() as an HTML error page and the
+    // user is told the JSON is malformed, which points at the wrong thing.
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  })
   .then(m => {
     manifest = m;
     const n = Object.keys(m.targets || {}).length;
@@ -268,8 +273,37 @@ $('#go').onclick = async () => {
 
     $('#status').textContent = 'Downloading firmware for ' + name + '…';
     say('\n' + name + ' detected → ' + spec.file);
-    const buf = await (await fetch(spec.file, {cache: 'no-store'})).arrayBuffer();
-    const data = new Uint8Array(buf);
+
+    /* Check what came back before writing a byte of it.
+     *
+     * fetch() only rejects on a network failure: a 404, a 503 or a captive
+     * portal all resolve, and arrayBuffer() then hands over the error page.
+     * Written at offset 0 that is a bricked board, delivered by the tool whose
+     * whole job is to be the safe way in.
+     *
+     * 0xE9 is the ESP image magic. It is one byte and it separates "firmware"
+     * from "anything else that arrived over HTTP", which is the distinction
+     * that matters here. */
+    const res = await fetch(spec.file, {cache: 'no-store'});
+    if (!res.ok) {
+      throw new Error('Could not download ' + spec.file + ' (HTTP ' + res.status +
+                      '). Nothing was written to the board.');
+    }
+    const data = new Uint8Array(await res.arrayBuffer());
+    if (data.length < 0x1000 || data[0] !== 0xE9) {
+      throw new Error('The downloaded file is not an ESP firmware image. ' +
+                      'Nothing was written to the board. Reload and try again.');
+    }
+
+    /* An update at address 0 would put the app over the bootloader. The
+     * manifest is generated from partitions.csv by the Pages workflow, and an
+     * address that came back 0 means that generation failed. */
+    if (mode === 'update' &&
+        !(spec.address > 0 && manifest.otadata_address > 0)) {
+      throw new Error('This release has a bad manifest — use "First time, or ' +
+                      'recovery" instead. Nothing was written to the board.');
+    }
+
     say('image ' + data.length.toLocaleString() + ' bytes → 0x' +
         spec.address.toString(16));
 

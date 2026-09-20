@@ -31,31 +31,34 @@
 const data_descriptor_t data_descriptors[] = {
     // Camera mode switch
     // 拍摄模式切换
-    {0x1D, 0x04, (data_creator_func_t)camera_mode_switch_creator, (data_parser_func_t)camera_mode_switch_parser},
+    {0x1D, 0x04, (data_creator_func_t)camera_mode_switch_creator, (data_parser_func_t)camera_mode_switch_parser, 0},
     // Version query
     // 版本号查询
-    {0x00, 0x00, NULL, (data_parser_func_t)version_query_parser},
+    {0x00, 0x00, NULL, (data_parser_func_t)version_query_parser, 0},
     // Record control
     // 拍录控制
-    {0x1D, 0x03, (data_creator_func_t)record_control_creator, (data_parser_func_t)record_control_parser},
+    {0x1D, 0x03, (data_creator_func_t)record_control_creator, (data_parser_func_t)record_control_parser, 0},
     // GPS data push
     // GPS 数据推送
-    {0x00, 0x17, (data_creator_func_t)gps_data_creator, (data_parser_func_t)gps_data_parser},
+    {0x00, 0x17, (data_creator_func_t)gps_data_creator, (data_parser_func_t)gps_data_parser, 0},
     // Connection request
     // 连接请求
-    {0x00, 0x19, (data_creator_func_t)connection_data_creator, (data_parser_func_t)connection_data_parser},
+    {0x00, 0x19, (data_creator_func_t)connection_data_creator, (data_parser_func_t)connection_data_parser, 0},
     // Camera status subscription
     // 相机状态订阅
-    {0x1D, 0x05, (data_creator_func_t)camera_status_subscription_creator, NULL},
+    {0x1D, 0x05, (data_creator_func_t)camera_status_subscription_creator, NULL, 0},
     // Camera status push
     // 相机状态推送
-    {0x1D, 0x02, NULL, (data_parser_func_t)camera_status_push_data_parser},
+    // SLATE PATCH: out_size, because this parser accepts a short frame and
+    // zero-fills the remainder -- see data_descriptor_t.out_size.
+    {0x1D, 0x02, NULL, (data_parser_func_t)camera_status_push_data_parser,
+     sizeof(camera_status_push_command_frame)},
     // New Camera status push
     // 新相机状态推送
-    {0x1D, 0x06, NULL, (data_parser_func_t)new_camera_status_push_data_parser},
+    {0x1D, 0x06, NULL, (data_parser_func_t)new_camera_status_push_data_parser, 0},
     // Key report
     // 按键上报
-    {0x00, 0x11, (data_creator_func_t)key_report_creator, (data_parser_func_t)key_report_parser},
+    {0x00, 0x11, (data_creator_func_t)key_report_creator, (data_parser_func_t)key_report_parser, 0},
 };
 const size_t DATA_DESCRIPTORS_COUNT = sizeof(data_descriptors) / sizeof(data_descriptors[0]);
 

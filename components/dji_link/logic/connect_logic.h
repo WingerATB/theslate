@@ -20,6 +20,11 @@
 #ifndef __CONNECT_LOGIC_H__
 #define __CONNECT_LOGIC_H__
 
+/* SLATE ADDITION: this header has always used bool and uint32_t while relying
+ * on every includer to have pulled them in first. Say so here instead. */
+#include <stdbool.h>
+#include <stdint.h>
+
 typedef enum {
     BLE_NOT_INIT = -1,
     BLE_INIT_COMPLETE = 0,
@@ -31,6 +36,16 @@ typedef enum {
 } connect_state_t;
 
 connect_state_t connect_logic_get_state(void);
+
+/* SLATE ADDITION: is there a camera link right now?
+ *
+ * The enum above is NOT ordered by how connected the module is -- BLE_CONNECTED
+ * is 2 while BLE_DISCONNECTING is 4 -- so a comparison like
+ * "state >= BLE_CONNECTED" answers a different question from the one it looks
+ * like it is asking, and reads a link that is on its way down as up. Ask this
+ * instead; it names the two states that actually mean a camera is reachable,
+ * and it keeps meaning that if the enum grows again. */
+bool connect_logic_link_up(void);
 
 int connect_logic_ble_init();
 

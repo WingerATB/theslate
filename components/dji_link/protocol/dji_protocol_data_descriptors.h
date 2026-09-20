@@ -36,6 +36,22 @@ typedef struct {
                                   // 数据创建函数指针
     data_parser_func_t parser;    // Data parsing function pointer
                                   // 数据解析函数指针
+
+    /* SLATE ADDITION: how many bytes this parser may write into structure_out,
+     * when that can exceed the payload it was handed.
+     *
+     * Every upstream parser refuses a payload shorter than its output struct,
+     * so for those the payload length is by itself a sufficient allocation and
+     * this stays 0. The 1D02 parser is the exception: it deliberately ACCEPTS a
+     * short frame and zero-fills the rest of the struct, so the buffer it is
+     * given has to be struct-sized rather than payload-sized. Without this the
+     * allocation is exactly the case the short-frame patch exists to serve, and
+     * it overflows on it.
+     *
+     * The number is a property of the parser, so it lives beside the parser
+     * rather than as a constant in protocol_parse_data() that nobody would
+     * think to update when a descriptor is added. */
+    size_t out_size;
 } data_descriptor_t;
 extern const data_descriptor_t data_descriptors[];
 extern const size_t DATA_DESCRIPTORS_COUNT;

@@ -18,6 +18,9 @@
 #include "data.h"
 #include "status_logic.h"
 #include "command_logic.h"
+/* For g_dji_camera_status_payload_len: how much of the 1D02 struct the camera
+ * actually sent, which is what tells a zero-filled field from a real zero. */
+#include "dji_protocol_data_descriptors.h"
 #include "nvs_flash.h"
 #include "cam_bind.h"
 #include "camvendor.h"
@@ -564,32 +567,69 @@ void duml_cam_get(duml_cam_status_t *out)
 static const uint32_t s_rsdk_device_id  = 0x00000000u;
 static const uint32_t s_rsdk_fw_version = 0x00000000u;
 
+/* Does the frame the camera actually sent reach far enough to carry this field?
+ *
+ * The 1D02 parser accepts a short push and zero-fills the rest of the struct,
+ * so every trailing field is readable whether or not the camera sent it -- and
+ * a zero that was never sent is indistinguishable from a zero that was, unless
+ * the length is consulted. It is: g_dji_camera_status_payload_len carries how
+ * many bytes arrived. Battery is the last field in the struct and therefore the
+ * first casualty, which is exactly the field that drives BAT LOW. */
+#define RSDK_SENT(len, field)                                              \
+    ((len) >= offsetof(camera_status_push_command_frame, field) +          \
+              sizeof(((const camera_status_push_command_frame *)0)->field))
+
 /* Map DJI's status push onto the same snapshot the DUML path fills, so the OSD,
- * the record state machine and the CLI cannot tell which protocol produced it. */
+ * the record state machine and the CLI cannot tell which protocol produced it.
+ *
+ * data.c mallocs this copy and hands ownership over, the same contract it has
+ * with status_logic's own handler -- which frees it. So must this one, on every
+ * path out, or the 2 Hz push rate turns a missing free into a few kilobytes a
+ * minute on a part where both radios are already competing for heap. */
 static void rsdk_status_cb(void *data)
 {
     const camera_status_push_command_frame *f = data;
     if (f == NULL) return;
-    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return;
 
-    /* 0x03 is photo/video in progress; 0x05 is pre-recording, which is rolling
-     * as far as anything downstream is concerned. */
-    s_st.rec_state = (f->camera_status == 0x03) ? DUML_REC_RECORDING
-                   : (f->camera_status == 0x05) ? DUML_REC_STARTING
-                                                : DUML_REC_IDLE;
-    s_st.clip_s    = f->record_time;
-    s_st.free_mb   = f->remain_capacity;
-    s_st.left_s    = f->remain_time;
-    s_st.work_mode = f->camera_mode;
-    if (f->camera_bat_percentage <= 100) {
-        s_st.battery_pct = f->camera_bat_percentage;
-        s_last_batt_ms   = now_ms();
+    /* Read once: the parser sets it immediately before this call, on this same
+     * task, and a field-by-field re-read would invite a future reordering. */
+    const size_t sent = g_dji_camera_status_payload_len;
+
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+        /* camera_status sits at offset 1 and the parser rejects anything
+         * shorter than two bytes, so this field is always present. */
+        /* 0x03 is photo/video in progress; 0x05 is pre-recording, which is
+         * rolling as far as anything downstream is concerned. */
+        s_st.rec_state = (f->camera_status == 0x03) ? DUML_REC_RECORDING
+                       : (f->camera_status == 0x05) ? DUML_REC_STARTING
+                                                    : DUML_REC_IDLE;
+        s_st.work_mode = f->camera_mode;
+
+        /* A field the camera did not send leaves the previous reading alone
+         * rather than overwriting it with the zero fill. The existing staleness
+         * timers then age it out on their own schedule, which is the same
+         * treatment a camera that has gone quiet already gets. */
+        if (RSDK_SENT(sent, record_time))     s_st.clip_s  = f->record_time;
+        if (RSDK_SENT(sent, remain_capacity)) s_st.free_mb = f->remain_capacity;
+        if (RSDK_SENT(sent, remain_time))     s_st.left_s  = f->remain_time;
+
+        if (RSDK_SENT(sent, camera_bat_percentage) &&
+            f->camera_bat_percentage <= 100) {
+            s_st.battery_pct = f->camera_bat_percentage;
+            s_last_batt_ms   = now_ms();
+        }
+
+        /* The camera is talking either way, short frame or not. */
+        s_last_status_ms = now_ms();
+        xSemaphoreGive(s_lock);
     }
-    s_last_status_ms = now_ms();
-    xSemaphoreGive(s_lock);
+
+    free(data);
 }
 
-static void rsdk_new_status_cb(void *data) { (void)data; }
+/* 1D06 is parsed and delivered but nothing downstream consumes it yet. The copy
+ * still has to be released -- see rsdk_status_cb() for the ownership contract. */
+static void rsdk_new_status_cb(void *data) { free(data); }
 
 static void rsdk_record_now(bool on)
 {
@@ -736,7 +776,7 @@ static void cam_task(void *arg)
             continue;
         }
 
-        if (connect_logic_get_state() < BLE_CONNECTED) {
+        if (!connect_logic_link_up()) {
             if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
                 s_st.link_up = false;
                 xSemaphoreGive(s_lock);
@@ -827,7 +867,7 @@ static void cam_task(void *arg)
                 xSemaphoreGive(s_lock);
             }
 
-            while (connect_logic_get_state() >= BLE_CONNECTED) {
+            while (connect_logic_link_up()) {
                 gopro_cam_tick();
 
                 if (s_req_pending) {
@@ -899,7 +939,7 @@ static void cam_task(void *arg)
             xSemaphoreGive(s_lock);
         }
 
-        while (connect_logic_get_state() >= BLE_CONNECTED) {
+        while (connect_logic_link_up()) {
             if (s_req_pending) {
                 bool on = s_req_value;
                 s_req_pending = false;

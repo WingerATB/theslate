@@ -246,7 +246,26 @@ void *protocol_parse_data(const uint8_t *data, size_t data_length, uint8_t cmd_t
 
     ESP_LOGI(TAG, "CmdSet: 0x%02X, CmdID: 0x%02X", cmd_set, cmd_id);
 
-    void *response_struct = malloc(response_length);
+    /* SLATE PATCH: allocate for what the PARSER may write, not merely for what
+     * the camera sent.
+     *
+     * A parser that accepts a short payload and zero-fills the rest of its
+     * output struct (1D02 does, deliberately) writes past a payload-sized
+     * block. The descriptor states that size; every other parser leaves it 0
+     * and behaves exactly as before.
+     *
+     * The reported length is the BUFFER size for the same reason: the copy the
+     * consumer takes has to cover the whole struct, or a trailing field reads
+     * off the end of the copy instead of off the end of this block. How much of
+     * that buffer the camera actually filled is a separate question, and
+     * g_dji_camera_status_payload_len is the answer to it. */
+    size_t alloc_length = response_length;
+    if (descriptor->out_size > alloc_length)
+    {
+        alloc_length = descriptor->out_size;
+    }
+
+    void *response_struct = malloc(alloc_length);
     if (response_struct == NULL)
     {
         ESP_LOGE(TAG, "Memory allocation failed for parsed data");
@@ -264,7 +283,7 @@ void *protocol_parse_data(const uint8_t *data, size_t data_length, uint8_t cmd_t
         ESP_LOGI(TAG, "Data parsed successfully for CmdSet 0x%02X and CmdID 0x%02X", cmd_set, cmd_id);
         if (data_length_without_cmd_out != NULL)
         {
-            *data_length_without_cmd_out = response_length;
+            *data_length_without_cmd_out = alloc_length;
         }
     }
     else if (result == -2)

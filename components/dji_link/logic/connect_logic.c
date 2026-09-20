@@ -45,6 +45,13 @@ connect_state_t connect_logic_get_state(void) {
     return connect_state;
 }
 
+/* SLATE ADDITION: the only honest answer to "is a camera reachable".
+ * See the note in connect_logic.h for why an ordinal comparison is not. */
+bool connect_logic_link_up(void) {
+    connect_state_t s = connect_state;
+    return s == BLE_CONNECTED || s == PROTOCOL_CONNECTED;
+}
+
 /**
  * @brief Handle camera disconnection (callback function)
  *        处理相机断开连接（回调函数）
@@ -209,6 +216,20 @@ int connect_logic_ble_connect(bool is_reconnecting) {
         return -1;
     }
 
+    /* SLATE PATCH: do not promote a link that has gone away underneath us.
+     *
+     * Everything above this point blocks -- handle discovery polls for up to a
+     * second, notification registration waits on its own event. The disconnect
+     * handler runs on the Bluedroid callback task and can set BLE_INIT_COMPLETE
+     * at any moment inside that window. An unconditional assignment here puts
+     * the state back to CONNECTED on a link that is already gone, and no
+     * further GATTC event will ever arrive to correct it. */
+    if (!s_ble_profile.connection_status.is_connected) {
+        ESP_LOGW(TAG, "Link dropped during connect; not promoting to CONNECTED");
+        connect_state = BLE_INIT_COMPLETE;
+        return -1;
+    }
+
     // Update state to BLE connected
     // 更新状态为 BLE 已连接
     connect_state = BLE_CONNECTED;
@@ -231,9 +252,31 @@ int connect_logic_ble_connect(bool is_reconnecting) {
  *             成功返回 0，失败返回 -1
  */
 int connect_logic_ble_disconnect(void) {
+    /* SLATE PATCH: a link that is ALREADY down settles here, it does not wait.
+     *
+     * BLE_DISCONNECTING is a transient state that only ESP_GATTC_DISCONNECT_EVT
+     * clears. ble_disconnect() issues no close when is_connected is already
+     * false -- it just returns ESP_OK -- so on that path the event never comes
+     * and the state stays at BLE_DISCONNECTING for ever. That is worse than it
+     * sounds: BLE_DISCONNECTING is 4 and BLE_CONNECTED is 2, so every ordinal
+     * ">= BLE_CONNECTED" test in the camera task reads the parked state as
+     * CONNECTED. The task then never rescans and the module never finds the
+     * camera again until it is power-cycled.
+     *
+     * Reaching this with the link already gone is the normal case, not an odd
+     * one: the camera task calls this after a session-start failure, and a
+     * failure to start a session is most often a link that dropped underneath
+     * it. */
+    if (!s_ble_profile.connection_status.is_connected) {
+        ESP_LOGI(TAG, "Camera link is already down; settling to disconnected");
+        connect_state = BLE_INIT_COMPLETE;
+        camera_status_initialized = false;
+        return 0;
+    }
+
     connect_state_t old_state = connect_state;
     connect_state = BLE_DISCONNECTING;
-    
+
     ESP_LOGI(TAG, "Disconnecting camera...");
 
     // Call BLE layer's ble_disconnect function
@@ -400,6 +443,16 @@ wait_for_camera_command:
         // STEP4: Send connection response frame
         // 发送连接应答帧
         send_command(0x00, 0x19, ACK_NO_RESPONSE, &connection_response, received_seq, 5000);
+
+        /* SLATE PATCH: same rule as the BLE_CONNECTED promotion -- the
+         * handshake above blocks for seconds, and a disconnect landing inside
+         * it must not be overwritten by this assignment. */
+        if (!s_ble_profile.connection_status.is_connected) {
+            ESP_LOGW(TAG, "Link dropped during the handshake; not promoting");
+            connect_state = BLE_INIT_COMPLETE;
+            free(parse_result);
+            return -1;
+        }
 
         // Set connection state to protocol connected
         // 设置连接状态为协议连接

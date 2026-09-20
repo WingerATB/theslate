@@ -676,9 +676,25 @@ void app_main(void)
         .baud             = MSP_BAUD,
         .link_timeout_ms  = MSP_LINK_TIMEOUT_MS,
     };
-    if (msp_init(&mcfg) != ESP_OK) {
-        ESP_LOGE(TAG, "MSP init failed");
-        return;
+    /* A failed MSP bring-up must NOT end app_main.
+     *
+     * It used to return here, and everything below is what that took with it:
+     * the LED and the button, so no ten-second hold into setup; the camera
+     * task; the USB watcher, so no way in by cable either; and the OTA
+     * probation timer. The module sat powered and completely inert with every
+     * documented recovery route removed at once, and the pins that get it there
+     * are Kconfig-settable, so a bad build reaches this state on hardware that
+     * is otherwise fine.
+     *
+     * Carrying on costs nothing: camlink already treats a down link as an
+     * ordinary state -- it is the same state as an unplugged flight controller
+     * -- so the module comes up, says so on the LED, and can still be reached
+     * to be fixed. */
+    bool msp_up = (msp_init(&mcfg) == ESP_OK);
+    if (!msp_up) {
+        ESP_LOGE(TAG, "MSP init failed -- no flight controller link this boot. "
+                      "Check CAMLINK_MSP_TX_GPIO/RX_GPIO. Setup is still "
+                      "reachable by button or USB cable.");
     }
 
     camlink_config_t ccfg = {
@@ -704,7 +720,11 @@ void app_main(void)
     duml_cam_start();
     ui_init(on_button);
 
-    xTaskCreate(msp_task,           "msp",   4096, NULL, 6, NULL);
+    /* Only if the UART actually came up. The logic task runs either way -- with
+     * no link it simply never sees an arm, which is the bench case. */
+    if (msp_up) {
+        xTaskCreate(msp_task,       "msp",   4096, NULL, 6, NULL);
+    }
     xTaskCreate(camlink_logic_task, "logic", 4096, NULL, 5, NULL);
     xTaskCreate(ui_task_update,     "uiled", 2560, NULL, 2, NULL);
 

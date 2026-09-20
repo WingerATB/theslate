@@ -497,6 +497,37 @@ static esp_err_t repair_post(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
+/* Copy a device-supplied string into a JSON string literal, safely.
+ *
+ * The advertised name is raw bytes off the air, and the page's camera list is
+ * one JSON document: a single quote or backslash in one name breaks the whole
+ * array, the poll's parse throws, and the picker silently stops updating for as
+ * long as that device is in range. Nothing about that failure points at the
+ * cause.
+ *
+ * Escapes what JSON requires and drops the control characters outright --
+ * nothing below 0x20 belongs in a camera name, and \u escapes would cost more
+ * room here than the case is worth. Bytes above 0x7F are passed through: a name
+ * is UTF-8 and the page renders it as such. Always NUL-terminates.
+ *
+ * The page escapes for HTML at its own sink; this is the separate job of
+ * keeping the document parseable. */
+static void json_escape(char *out, size_t cap, const char *in)
+{
+    size_t o = 0;
+    if (cap == 0) return;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o + 2 < cap; p++) {
+        if (*p == '"' || *p == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)*p;
+        } else if (*p >= 0x20) {
+            out[o++] = (char)*p;
+        }
+        /* else: a control byte, dropped */
+    }
+    out[o] = '\0';
+}
+
 /* The live camera list. Polled by the page while the user is looking at it, so
  * a camera switched on after the page loaded still turns up. */
 static esp_err_t scan_get(httpd_req_t *req)
@@ -516,7 +547,10 @@ static esp_err_t scan_get(httpd_req_t *req)
          * page shows nothing at all, which is a worse answer than a short
          * list. CAM_SCAN_MAX is 12 and each entry is ~80 bytes, so this is a
          * backstop, not the normal path. */
-        if (w > (int)sizeof(body) - 160) break;
+        if (w > (int)sizeof(body) - 200) break;
+        /* Worst case is every byte escaped, so twice the source plus the NUL. */
+        char name[CAM_SCAN_NAME_LEN * 2 + 1];
+        json_escape(name, sizeof(name), c->name);
         w += snprintf(body + w, sizeof(body) - w,
             "%s{\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
             "\"id\":\"%02X%02X%02X%02X%02X%02X\",\"name\":\"%s\","
@@ -524,7 +558,7 @@ static esp_err_t scan_get(httpd_req_t *req)
             i ? "," : "",
             c->bda[0], c->bda[1], c->bda[2], c->bda[3], c->bda[4], c->bda[5],
             c->bda[0], c->bda[1], c->bda[2], c->bda[3], c->bda[4], c->bda[5],
-            c->name, cam_scan_model_name(c->vendor, c->model), c->rssi,
+            name, cam_scan_model_name(c->vendor, c->model), c->rssi,
             /* Any camera the module holds, not only the top-priority one --
              * the list shows all of them and a card must not offer to bind
              * something that is already up there. */

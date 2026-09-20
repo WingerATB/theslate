@@ -1779,7 +1779,17 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
         // Handle service search complete event
         // 处理服务搜索完成事件
         if (param->search_cmpl.status != ESP_GATT_OK) {
-            ESP_LOGE(TAG, "Service search failed, status=%d", param->search_cmpl.status);
+            ESP_LOGE(TAG, "Service search failed, status=%d -- closing the link",
+                     param->search_cmpl.status);
+            /* SLATE PATCH: tear the link down rather than leaving it open.
+             *
+             * Simply breaking here left the ACL up with is_connected true and
+             * no handles resolved. The camera, being connected to us, then
+             * stops advertising -- so every later scan finds nothing and the
+             * module sits on a live but useless link until the camera itself
+             * hangs up. Closing it produces a DISCONNECT_EVT, which puts the
+             * normal scan-and-connect cycle back in motion. */
+            esp_ble_gattc_close(gattc_if, s_ble_profile.conn_id);
             break;
         }
         ESP_LOGI(TAG, "Service search complete, next get char by UUID");
@@ -1793,6 +1803,10 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
         if (s_ble_profile.service_start_handle == 0) {
             ESP_LOGE(TAG, "the %s service is not on this camera -- "
                           "nothing here can be talked to", s_profile->name);
+            /* SLATE PATCH: and therefore let it go, for the same reason as the
+             * failure above -- a camera we hold open is a camera nothing can
+             * find again. */
+            esp_ble_gattc_close(gattc_if, s_ble_profile.conn_id);
             break;
         }
 
